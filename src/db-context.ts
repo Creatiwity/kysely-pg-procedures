@@ -84,6 +84,9 @@ export interface DbContext {
   /** PERFORM query */
   perform(query: SqlFragment | Compilable): void
 
+  /** Debug snapshot — only emitted when compiled with debug=true */
+  snapshot(label: string): void
+
   /** Temp table helpers — accessed as db[alias] */
   [alias: string]: TempTableHelper | unknown
 }
@@ -318,6 +321,10 @@ export function buildDbContext(
 
     perform(query: SqlFragment | Compilable): void {
       push({ kind: 'perform', query: toSqlFragment(query) })
+    },
+
+    snapshot(label: string): void {
+      push({ kind: 'snapshot', label })
     },
   }
 

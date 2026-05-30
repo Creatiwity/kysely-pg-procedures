@@ -209,7 +209,24 @@ describe('buildDbContext', () => {
   })
 
   // -------------------------------------------------------------------------
-  // 8. temp table helper accessible via db[alias] when defineTempTable called with { as }
+  // 8. db.snapshot pushes kind="snapshot" with the given label
+  // -------------------------------------------------------------------------
+  it('db.snapshot("label") pushes { kind: "snapshot", label: "label" } to statements', () => {
+    const stmts = capture((db) => {
+      db.snapshot('label')
+    })
+
+    expect(stmts).toHaveLength(1)
+    const stmt = stmts[0]!
+    expect(stmt.kind).toBe('snapshot')
+
+    if (stmt.kind === 'snapshot') {
+      expect(stmt.label).toBe('label')
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // 9. temp table helper accessible via db[alias] when defineTempTable called with { as }
   // -------------------------------------------------------------------------
   it('db[alias] returns the TempTableHelper when defineTempTable is called with { as: "alias" }', () => {
     const tableArgs = ['scoring_items', { score: 'integer' as const }, { as: 'items' }] as const

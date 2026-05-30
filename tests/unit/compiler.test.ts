@@ -5,6 +5,7 @@ import {
   defineTempTable,
   compileAll,
   compileTrigger,
+  compileProcedure,
   sql,
 } from '../../src/index.js'
 
@@ -263,5 +264,89 @@ describe('compileProcedure', () => {
     expect(procIdx).toBeGreaterThan(-1)
     expect(trgIdx).toBeGreaterThan(-1)
     expect(procIdx).toBeLessThan(trgIdx)
+  })
+
+  // -------------------------------------------------------------------------
+  // 9. db.snapshot() — production mode (debug=false): no INSERT INTO _proc_snapshot
+  // -------------------------------------------------------------------------
+  it('db.snapshot("after_select") with debug=false does NOT emit INSERT INTO _proc_snapshot', () => {
+    const proc = defineProcedure(
+      { name: 'snap_prod_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.snapshot('after_select')
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).not.toContain('INSERT INTO _proc_snapshot')
+  })
+
+  // -------------------------------------------------------------------------
+  // 10. db.snapshot() — debug=true: emits INSERT INTO _proc_snapshot with label and proc name
+  // -------------------------------------------------------------------------
+  it('db.snapshot("after_select") with debug=true emits INSERT INTO _proc_snapshot with label and proc name', () => {
+    const proc = defineProcedure(
+      { name: 'snap_debug_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.snapshot('after_select')
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { debug: true })
+
+    expect(output).toContain('INSERT INTO _proc_snapshot')
+    expect(output).toContain("'after_select'")
+    expect(output).toContain("'snap_debug_fn'")
+  })
+
+  // -------------------------------------------------------------------------
+  // 11. debug=true with a temp table: emits INSERT INTO _proc_snapshot_rows
+  // -------------------------------------------------------------------------
+  it('db.snapshot() with debug=true and a temp table emits INSERT INTO _proc_snapshot_rows', () => {
+    const myTable = defineTempTable('snap_items', { label: 'text' })
+
+    const proc = defineProcedure(
+      { name: 'snap_rows_fn' },
+      [myTable],
+      {},
+      ({ db }) => {
+        db.snapshot('after_insert')
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { debug: true })
+
+    expect(output).toContain('INSERT INTO _proc_snapshot_rows')
+    expect(output).toContain("'snap_items'")
+    expect(output).toContain("'after_insert'")
+  })
+
+  // -------------------------------------------------------------------------
+  // 12. debug=true with a declared var: emits INSERT INTO _proc_snapshot_vars
+  // -------------------------------------------------------------------------
+  it('db.snapshot() with debug=true and a declared var emits INSERT INTO _proc_snapshot_vars', () => {
+    const proc = defineProcedure(
+      { name: 'snap_vars_fn' },
+      [],
+      { my_count: 'integer' },
+      ({ db }) => {
+        db.snapshot('after_count')
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { debug: true })
+
+    expect(output).toContain('INSERT INTO _proc_snapshot_vars')
+    expect(output).toContain("'my_count'")
+    expect(output).toContain("'after_count'")
   })
 })

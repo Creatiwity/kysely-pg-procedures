@@ -116,8 +116,64 @@ function filterBody(stmts: Statement[]): Statement[] {
   return stmts.filter((s) => s.kind !== 'vars' && s.kind !== 'catch')
 }
 
-function compileStmt(stmt: Statement, level: number): string {
+// ---------------------------------------------------------------------------
+// Compile options and statement context
+// ---------------------------------------------------------------------------
+
+export interface CompileOpts {
+  debug?: boolean
+}
+
+interface StmtCtx {
+  procName: string
+  tempTables: TempTableDef[]
+  vars: Map<string, string>
+  debug: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot SQL helpers
+// ---------------------------------------------------------------------------
+
+function compileSnapshotDebug(stmt: { label: string }, ctx: StmtCtx, level: number): string {
   const i = ind(level)
+  const ii = ind(level + 1)
+  const label = stmt.label.replace(/'/g, "''")
+  const procName = ctx.procName.replace(/'/g, "''")
+
+  const lines: string[] = [
+    `${i}INSERT INTO _proc_snapshot (execution_id, function_name, snapshot_name, created_at)`,
+    `${i}VALUES (_proc_instance_id, '${procName}', '${label}', now());`,
+  ]
+
+  for (const table of ctx.tempTables) {
+    const tableName = table.name.replace(/'/g, "''")
+    lines.push(
+      `${i}INSERT INTO _proc_snapshot_rows (execution_id, snapshot_name, table_name, row_data)`,
+      `${i}SELECT _proc_instance_id, '${label}', '${tableName}', row_to_json(t)`,
+      `${i}FROM "${table.name}" t WHERE t._proc_instance_id = _proc_instance_id;`,
+    )
+  }
+
+  for (const varName of ctx.vars.keys()) {
+    if (varName === '_proc_instance_id') continue
+    const safeVar = varName.replace(/'/g, "''")
+    lines.push(
+      `${i}INSERT INTO _proc_snapshot_vars (execution_id, snapshot_name, var_name, var_value)`,
+      `${i}VALUES (_proc_instance_id, '${label}', '${safeVar}', ${varName}::text);`,
+    )
+  }
+
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// Statement compiler
+// ---------------------------------------------------------------------------
+
+function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
+  const i = ind(level)
+  const recurse = (s: Statement, l: number) => compileStmt(s, l, ctx)
 
   switch (stmt.kind) {
     case 'vars':
@@ -130,7 +186,7 @@ function compileStmt(stmt: Statement, level: number): string {
     case 'if': {
       const lines = [`${i}IF ${frag(stmt.condition)} THEN`]
       for (const s of filterBody(stmt.then)) {
-        const out = compileStmt(s, level + 1)
+        const out = recurse(s, level + 1)
         if (out) {
           lines.push(out)
         }
@@ -138,7 +194,7 @@ function compileStmt(stmt: Statement, level: number): string {
       if (stmt.else?.length) {
         lines.push(`${i}ELSE`)
         for (const s of filterBody(stmt.else)) {
-          const out = compileStmt(s, level + 1)
+          const out = recurse(s, level + 1)
           if (out) {
             lines.push(out)
           }
@@ -156,7 +212,7 @@ function compileStmt(stmt: Statement, level: number): string {
       if (!first) return ''
       const lines = [`${i}IF ${frag(first.when)} THEN`]
       for (const s of filterBody(first.then)) {
-        const out = compileStmt(s, level + 1)
+        const out = recurse(s, level + 1)
         if (out) {
           lines.push(out)
         }
@@ -164,7 +220,7 @@ function compileStmt(stmt: Statement, level: number): string {
       for (const branch of rest) {
         lines.push(`${i}ELSIF ${frag(branch.when)} THEN`)
         for (const s of filterBody(branch.then)) {
-          const out = compileStmt(s, level + 1)
+          const out = recurse(s, level + 1)
           if (out) {
             lines.push(out)
           }
@@ -173,7 +229,7 @@ function compileStmt(stmt: Statement, level: number): string {
       if (stmt.else?.length) {
         lines.push(`${i}ELSE`)
         for (const s of filterBody(stmt.else)) {
-          const out = compileStmt(s, level + 1)
+          const out = recurse(s, level + 1)
           if (out) {
             lines.push(out)
           }
@@ -188,7 +244,7 @@ function compileStmt(stmt: Statement, level: number): string {
       for (const [value, body] of stmt.branches) {
         lines.push(`${i}WHEN '${value}' THEN`)
         for (const s of filterBody(body)) {
-          const out = compileStmt(s, level + 1)
+          const out = recurse(s, level + 1)
           if (out) {
             lines.push(out)
           }
@@ -197,7 +253,7 @@ function compileStmt(stmt: Statement, level: number): string {
       if (stmt.else?.length) {
         lines.push(`${i}ELSE`)
         for (const s of filterBody(stmt.else)) {
-          const out = compileStmt(s, level + 1)
+          const out = recurse(s, level + 1)
           if (out) {
             lines.push(out)
           }
@@ -217,7 +273,7 @@ function compileStmt(stmt: Statement, level: number): string {
     case 'forRow': {
       const lines = [`${i}FOR ${stmt.rowVar} IN ${frag(stmt.query)} LOOP`]
       for (const s of filterBody(stmt.body)) {
-        const out = compileStmt(s, level + 1)
+        const out = recurse(s, level + 1)
         if (out) {
           lines.push(out)
         }
@@ -229,7 +285,7 @@ function compileStmt(stmt: Statement, level: number): string {
     case 'forIn': {
       const lines = [`${i}FOR ${stmt.var} IN ${frag(stmt.from)}..${frag(stmt.to)} LOOP`]
       for (const s of filterBody(stmt.body)) {
-        const out = compileStmt(s, level + 1)
+        const out = recurse(s, level + 1)
         if (out) {
           lines.push(out)
         }
@@ -241,7 +297,7 @@ function compileStmt(stmt: Statement, level: number): string {
     case 'while': {
       const lines = [`${i}WHILE ${frag(stmt.condition)} LOOP`]
       for (const s of filterBody(stmt.body)) {
-        const out = compileStmt(s, level + 1)
+        const out = recurse(s, level + 1)
         if (out) {
           lines.push(out)
         }
@@ -253,7 +309,7 @@ function compileStmt(stmt: Statement, level: number): string {
     case 'loop': {
       const lines = [`${i}LOOP`]
       for (const s of filterBody(stmt.body)) {
-        const out = compileStmt(s, level + 1)
+        const out = recurse(s, level + 1)
         if (out) {
           lines.push(out)
         }
@@ -310,10 +366,17 @@ function compileStmt(stmt: Statement, level: number): string {
       const extra = stmt.where ? ` AND ${frag(stmt.where)}` : ''
       return `${i}DELETE FROM "${stmt.table.name}" AS t WHERE t."_proc_instance_id" = _proc_instance_id${extra};`
     }
+
+    case 'snapshot': {
+      if (ctx?.debug) {
+        return compileSnapshotDebug(stmt, ctx, level)
+      }
+      return ''
+    }
   }
 }
 
-export function compileProcedure(def: ProcedureDefinition): string {
+export function compileProcedure(def: ProcedureDefinition, opts?: CompileOpts): string {
   const stmts = executeBody(def)
 
   const declVars = collectVars(stmts)
@@ -322,6 +385,13 @@ export function compileProcedure(def: ProcedureDefinition): string {
   }
 
   const catchHandlers = collectCatch(stmts)
+
+  const ctx: StmtCtx = {
+    procName: def.name,
+    tempTables: def.tempTables,
+    vars: declVars,
+    debug: opts?.debug ?? false,
+  }
 
   let declare = ''
   if (declVars.size > 0) {
@@ -351,7 +421,7 @@ export function compileProcedure(def: ProcedureDefinition): string {
   }
 
   for (const stmt of preReturn) {
-    const out = compileStmt(stmt, 1)
+    const out = compileStmt(stmt, 1, ctx)
     if (out) {
       lines.push(out)
     }
@@ -369,14 +439,14 @@ export function compileProcedure(def: ProcedureDefinition): string {
   }
 
   if (returnStmt) {
-    const out = compileStmt(returnStmt, 1)
+    const out = compileStmt(returnStmt, 1, ctx)
     if (out) {
       lines.push(out)
     }
   }
 
   for (const stmt of postReturn) {
-    const out = compileStmt(stmt, 1)
+    const out = compileStmt(stmt, 1, ctx)
     if (out) {
       lines.push(out)
     }
@@ -391,7 +461,7 @@ export function compileProcedure(def: ProcedureDefinition): string {
         : handler.when
       lines.push(`${IND}${IND}WHEN ${conditions} THEN`)
       for (const s of handler.then) {
-        const out = compileStmt(s, 3)
+        const out = compileStmt(s, 3, ctx)
         if (out) {
           lines.push(out)
         }
@@ -456,20 +526,23 @@ export function compileTrigger(def: TriggerDefinition): string {
   return lines.join('\n')
 }
 
-export function compileAll(defs: Array<ProcedureDefinition | TriggerDefinition>): string {
+export function compileAll(
+  defs: Array<ProcedureDefinition | TriggerDefinition>,
+  opts?: CompileOpts,
+): string {
   const lines = ['-- Generated by @mesalia/kysely-pg-procedures', '-- DO NOT EDIT MANUALLY', '']
   const compiled = new Set<string>()
 
   for (const def of defs) {
     if (def._tag === 'Procedure') {
       if (!compiled.has(def.name)) {
-        lines.push(compileProcedure(def))
+        lines.push(compileProcedure(def, opts))
         lines.push('')
         compiled.add(def.name)
       }
     } else {
       if (!compiled.has(def.procedure.name)) {
-        lines.push(compileProcedure(def.procedure))
+        lines.push(compileProcedure(def.procedure, opts))
         lines.push('')
         compiled.add(def.procedure.name)
       }
@@ -479,4 +552,29 @@ export function compileAll(defs: Array<ProcedureDefinition | TriggerDefinition>)
   }
 
   return lines.join('\n')
+}
+
+export function snapshotSetupSql(): string {
+  return [
+    'CREATE TABLE IF NOT EXISTS _proc_snapshot (',
+    '    execution_id   uuid        NOT NULL,',
+    '    function_name  text        NOT NULL,',
+    '    snapshot_name  text        NOT NULL,',
+    '    created_at     timestamptz NOT NULL',
+    ');',
+    '',
+    'CREATE TABLE IF NOT EXISTS _proc_snapshot_rows (',
+    '    execution_id   uuid  NOT NULL,',
+    '    snapshot_name  text  NOT NULL,',
+    '    table_name     text  NOT NULL,',
+    '    row_data       jsonb NOT NULL',
+    ');',
+    '',
+    'CREATE TABLE IF NOT EXISTS _proc_snapshot_vars (',
+    '    execution_id   uuid NOT NULL,',
+    '    snapshot_name  text NOT NULL,',
+    '    var_name       text NOT NULL,',
+    '    var_value      text',
+    ');',
+  ].join('\n')
 }

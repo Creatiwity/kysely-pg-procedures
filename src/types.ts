@@ -67,3 +67,4 @@ export type Statement =
   | { kind: 'tempInsert'; table: TempTableDef; values: Record<string, SqlFragment> }
   | { kind: 'tempInsertFrom'; table: TempTableDef; columns: string[]; query: SqlFragment }
   | { kind: 'tempDelete'; table: TempTableDef; where?: SqlFragment }
+  | { kind: 'snapshot'; label: string }

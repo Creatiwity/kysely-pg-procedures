@@ -12,7 +12,8 @@ export type {
   ProcedureCallback,
 } from './procedure.js'
 
-export { compileProcedure, compileTrigger, compileAll } from './compiler.js'
+export { compileProcedure, compileTrigger, compileAll, snapshotSetupSql } from './compiler.js'
+export type { CompileOpts } from './compiler.js'
 
 export { compileDb, toSqlFragment, extractFromClause, isCompilable } from './kysely-compile.js'
 export type { Compilable } from './kysely-compile.js'
