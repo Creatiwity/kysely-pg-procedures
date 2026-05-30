@@ -70,7 +70,7 @@ export interface DbContext {
   updateTable: (typeof compileDb)['updateTable']
 
   /** Execute a raw SQL statement */
-  execute(query: SqlFragment | Compilable): void
+  execute(query: SqlFragment | Compilable, opts?: { label?: string }): void
 
   /** RETURN [value] */
   return(value?: SqlFragment | ColumnRef | string | number): void
@@ -161,9 +161,13 @@ function valueToFragment(value: SqlFragment | string | number): SqlFragment {
 // ---------------------------------------------------------------------------
 
 function makeRowProxy(rowName: 'NEW' | 'OLD'): Record<string, ColumnRef> {
-  return new Proxy({} as Record<string, ColumnRef>, {
-    get(_target, prop: string | symbol): ColumnRef {
-      if (typeof prop !== 'string') throw new TypeError(`db.${rowName}: symbol property access not supported`)
+  // The target carries _tag/text/colName so that `db.NEW` itself is a valid
+  // SqlFragment (compiles to "NEW") when passed directly to db.return() etc.
+  const self: ColumnRef = { _tag: 'sql', text: rowName, _colName: rowName }
+  return new Proxy(self as unknown as Record<string, ColumnRef>, {
+    get(target, prop: string | symbol): unknown {
+      if (typeof prop !== 'string') return (target as unknown as Record<symbol, unknown>)[prop]
+      if (prop === '_tag' || prop === 'text' || prop === '_colName') return (target as unknown as Record<string, unknown>)[prop]
       return makeColumnRef(`${rowName}."${prop}"`, prop)
     },
   })
@@ -222,11 +226,24 @@ function wrapSelectBuilder(kysely: SelectQueryBuilder<any, any, any>): DbSelectB
 // buildDbContext
 // ---------------------------------------------------------------------------
 
+// Wrap a TempTableHelper so statement-producing methods auto-push to the stack.
+// SqlFragment-producing methods (exists, notExists, filter) are left unchanged.
+function wrapHelperForPush(helper: TempTableHelper): TempTableHelper {
+  return {
+    ...helper,
+    insert(values) { const s = helper.insert(values); push(s); return s },
+    insertFrom(columns, query, opts) { const s = helper.insertFrom(columns, query, opts); push(s); return s },
+    delete(where) { const s = helper.delete(where); push(s); return s },
+  }
+}
+
 export function buildDbContext(
   tempTables: TempTableDef[],
   vars: VarDecls,
 ): { db: DbContext; getStatements(): Statement[] } {
-  const aliasMap: Record<string, TempTableHelper> = buildTempTableAliasMap(tempTables)
+  const aliasMap: Record<string, TempTableHelper> = Object.fromEntries(
+    Object.entries(buildTempTableAliasMap(tempTables)).map(([k, h]) => [k, wrapHelperForPush(h)])
+  )
 
   // The root statement array — populated by push() calls at the top level of
   // the callback (i.e. when _stack has exactly one frame).
@@ -290,8 +307,8 @@ export function buildDbContext(
     withRecursive: compileDb.withRecursive.bind(compileDb),
     updateTable: compileDb.updateTable.bind(compileDb),
 
-    execute(query: SqlFragment | Compilable): void {
-      push({ kind: 'raw', sql: toSqlFragment(query) })
+    execute(query: SqlFragment | Compilable, opts?: { label?: string }): void {
+      push({ kind: 'raw', sql: toSqlFragment(query), label: opts?.label })
     },
 
     return(value?: SqlFragment | ColumnRef | string | number): void {

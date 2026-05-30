@@ -15,6 +15,11 @@ export type {
 export { compileProcedure, compileTrigger, compileAll, snapshotSetupSql } from './compiler.js'
 export type { CompileOpts } from './compiler.js'
 
+export { logSetupSql } from './log-setup.js'
+
+export { createProcLogListener } from './notify-listener.js'
+export type { ProcLogEntry, ProcLogStep } from './notify-listener.js'
+
 export { compileDb, toSqlFragment, extractFromClause, isCompilable } from './kysely-compile.js'
 export type { Compilable } from './kysely-compile.js'
 

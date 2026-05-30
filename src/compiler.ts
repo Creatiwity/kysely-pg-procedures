@@ -122,6 +122,8 @@ function filterBody(stmts: Statement[]): Statement[] {
 
 export interface CompileOpts {
   debug?: boolean
+  log?: 'none' | 'info' | 'step' | 'debug'
+  logTarget?: 'table' | 'notify'
 }
 
 interface StmtCtx {
@@ -129,6 +131,9 @@ interface StmtCtx {
   tempTables: TempTableDef[]
   vars: Map<string, string>
   debug: boolean
+  log: 'none' | 'info' | 'step' | 'debug'
+  logTarget: 'table' | 'notify'
+  stepCounter: { value: number }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +142,6 @@ interface StmtCtx {
 
 function compileSnapshotDebug(stmt: { label: string }, ctx: StmtCtx, level: number): string {
   const i = ind(level)
-  const ii = ind(level + 1)
   const label = stmt.label.replace(/'/g, "''")
   const procName = ctx.procName.replace(/'/g, "''")
 
@@ -168,6 +172,108 @@ function compileSnapshotDebug(stmt: { label: string }, ctx: StmtCtx, level: numb
 }
 
 // ---------------------------------------------------------------------------
+// Log-level SQL helpers
+// ---------------------------------------------------------------------------
+
+function stepName(stmt: Statement, index: number): string {
+  if (
+    (stmt.kind === 'raw' ||
+      stmt.kind === 'tempInsert' ||
+      stmt.kind === 'tempInsertFrom' ||
+      stmt.kind === 'tempDelete' ||
+      stmt.kind === 'selectInto') &&
+    stmt.label
+  ) {
+    return stmt.label
+  }
+  return `${stmt.kind}_${index}`
+}
+
+function statementKindLabel(kind: string): string {
+  const map: Record<string, string> = {
+    raw: 'RAW',
+    tempInsert: 'TEMPINSERT',
+    tempInsertFrom: 'TEMPINSERTFROM',
+    tempDelete: 'TEMPDELETE',
+    selectInto: 'SELECTINTO',
+  }
+  return map[kind] ?? kind.toUpperCase()
+}
+
+/** Emit the step-tracking append block after a mutating statement */
+function compileStepAppend(stmt: Statement, index: number, level: number, ctx: StmtCtx): string {
+  const i = ind(level)
+  const name = stepName(stmt, index).replace(/'/g, "''")
+  const kind = statementKindLabel(stmt.kind)
+  return [
+    `${i}GET DIAGNOSTICS _proc_row_count = ROW_COUNT;`,
+    `${i}_proc_steps := _proc_steps || jsonb_build_object(`,
+    `${i}    'step_index', array_length(_proc_steps, 1),`,
+    `${i}    'step_name', '${name}',`,
+    `${i}    'statement_kind', '${kind}',`,
+    `${i}    'rows_affected', _proc_row_count,`,
+    `${i}    'executed_at', clock_timestamp()`,
+    `${i});`,
+  ].join('\n')
+}
+
+/** Emit the log flush SQL emitted just before every RETURN statement */
+function compileLogFlush(ctx: StmtCtx, level: number): string {
+  const i = ind(level)
+  const procName = ctx.procName.replace(/'/g, "''")
+  const lines: string[] = []
+
+  if (ctx.log === 'none') return ''
+
+  // Step flush (step / debug)
+  if (ctx.log === 'step' || ctx.log === 'debug') {
+    if (ctx.logTarget === 'table') {
+      lines.push(
+        `${i}INSERT INTO _proc_log_steps (execution_id, step_index, step_name, statement_kind, rows_affected, executed_at)`,
+        `${i}SELECT _proc_instance_id,`,
+        `${i}    (s->>'step_index')::int,`,
+        `${i}    s->>'step_name',`,
+        `${i}    s->>'statement_kind',`,
+        `${i}    (s->>'rows_affected')::int,`,
+        `${i}    (s->>'executed_at')::timestamptz`,
+        `${i}FROM unnest(_proc_steps) s;`,
+      )
+    } else {
+      // notify: one notification per step
+      lines.push(
+        `${i}DECLARE _proc_step_item JSONB;`,
+        `${i}FOREACH _proc_step_item IN ARRAY _proc_steps LOOP`,
+        `${i}    PERFORM pg_notify('proc_log', _proc_step_item::text);`,
+        `${i}END LOOP;`,
+      )
+    }
+  }
+
+  // Info-level log (info / step / debug)
+  if (ctx.logTarget === 'table') {
+    lines.push(
+      `${i}INSERT INTO _proc_log (execution_id, function_name, traceparent, span_id, started_at, duration_ms)`,
+      `${i}VALUES (_proc_instance_id, '${procName}', _traceparent, _span_id,`,
+      `${i}    _proc_started_at,`,
+      `${i}    EXTRACT(MILLISECONDS FROM clock_timestamp() - _proc_started_at)::int);`,
+    )
+  } else {
+    lines.push(
+      `${i}PERFORM pg_notify('proc_log', json_build_object(`,
+      `${i}    'execution_id', _proc_instance_id,`,
+      `${i}    'function_name', '${procName}',`,
+      `${i}    'traceparent', _traceparent,`,
+      `${i}    'span_id', _span_id,`,
+      `${i}    'started_at', _proc_started_at,`,
+      `${i}    'duration_ms', EXTRACT(MILLISECONDS FROM clock_timestamp() - _proc_started_at)::int`,
+      `${i})::text);`,
+    )
+  }
+
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
 // Statement compiler
 // ---------------------------------------------------------------------------
 
@@ -182,6 +288,16 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
 
     case 'set':
       return `${i}${stmt.target} := ${frag(stmt.value)};`
+
+    case 'return': {
+      // Inject log flush before every RETURN when log level is active
+      if (ctx && ctx.log !== 'none') {
+        const flush = compileLogFlush(ctx, level)
+        const ret = stmt.value ? `${i}RETURN ${frag(stmt.value)};` : `${i}RETURN;`
+        return flush ? `${flush}\n${ret}` : ret
+      }
+      return stmt.value ? `${i}RETURN ${frag(stmt.value)};` : `${i}RETURN;`
+    }
 
     case 'if': {
       const lines = [`${i}IF ${frag(stmt.condition)} THEN`]
@@ -267,7 +383,12 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
       const strict = stmt.strict ? ' STRICT' : ''
       const selectList = Object.values(stmt.vars).map(frag).join(', ')
       const intoVars = Object.keys(stmt.vars).join(', ')
-      return `${i}SELECT ${selectList}\n${i}INTO${strict} ${intoVars}\n${i}${frag(stmt.from)};`
+      const stmtSql = `${i}SELECT ${selectList}\n${i}INTO${strict} ${intoVars}\n${i}${frag(stmt.from)};`
+      if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
+        const idx = ctx.stepCounter.value++
+        return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
+      }
+      return stmtSql
     }
 
     case 'forRow': {
@@ -324,9 +445,6 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
     case 'continue':
       return stmt.when ? `${i}CONTINUE WHEN ${frag(stmt.when)};` : `${i}CONTINUE;`
 
-    case 'return':
-      return stmt.value ? `${i}RETURN ${frag(stmt.value)};` : `${i}RETURN;`
-
     case 'raise': {
       const args = stmt.args?.length ? `, ${stmt.args.map(frag).join(', ')}` : ''
       return `${i}RAISE ${stmt.level} '${stmt.message}'${args};`
@@ -337,14 +455,24 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
 
     case 'raw': {
       const text = frag(stmt.sql).trimEnd()
-      return `${i}${text}${text.endsWith(';') ? '' : ';'}`
+      const stmtSql = `${i}${text}${text.endsWith(';') ? '' : ';'}`
+      if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
+        const idx = ctx.stepCounter.value++
+        return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
+      }
+      return stmtSql
     }
 
     case 'tempInsert': {
       const cols = Object.keys(stmt.values)
       const colList = ['"_proc_instance_id"', ...cols.map((c) => `"${c}"`)].join(', ')
       const valList = ['_proc_instance_id', ...cols.map((c) => frag(stmt.values[c]!))].join(', ')
-      return `${i}INSERT INTO "${stmt.table.name}" (${colList})\n${i}VALUES (${valList});`
+      const stmtSql = `${i}INSERT INTO "${stmt.table.name}" (${colList})\n${i}VALUES (${valList});`
+      if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
+        const idx = ctx.stepCounter.value++
+        return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
+      }
+      return stmtSql
     }
 
     case 'tempInsertFrom': {
@@ -354,17 +482,27 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
         .split('\n')
         .map((l) => `${i}${IND}${l.trim()}`)
         .join('\n')
-      return [
+      const stmtSql = [
         `${i}INSERT INTO "${stmt.table.name}" (${colList})`,
         `${i}SELECT _proc_instance_id, * FROM (`,
         queryLines,
         `${i}) _subq;`,
       ].join('\n')
+      if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
+        const idx = ctx.stepCounter.value++
+        return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
+      }
+      return stmtSql
     }
 
     case 'tempDelete': {
       const extra = stmt.where ? ` AND ${frag(stmt.where)}` : ''
-      return `${i}DELETE FROM "${stmt.table.name}" AS t WHERE t."_proc_instance_id" = _proc_instance_id${extra};`
+      const stmtSql = `${i}DELETE FROM "${stmt.table.name}" AS t WHERE t."_proc_instance_id" = _proc_instance_id${extra};`
+      if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
+        const idx = ctx.stepCounter.value++
+        return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
+      }
+      return stmtSql
     }
 
     case 'snapshot': {
@@ -378,10 +516,28 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
 
 export function compileProcedure(def: ProcedureDefinition, opts?: CompileOpts): string {
   const stmts = executeBody(def)
+  const logLevel = opts?.log ?? 'none'
+  const logTarget = opts?.logTarget ?? 'table'
+  const effectiveDebug = (opts?.debug ?? false) || logLevel === 'debug'
 
   const declVars = collectVars(stmts)
-  if (def.tempTables.length > 0) {
-    declVars.set('_proc_instance_id', 'UUID := gen_random_uuid()')
+
+  // _proc_instance_id is needed for temp table isolation AND as execution_id in logs
+  if (def.tempTables.length > 0 || logLevel !== 'none') {
+    if (!declVars.has('_proc_instance_id')) {
+      declVars.set('_proc_instance_id', 'UUID := gen_random_uuid()')
+    }
+  }
+
+  // Log-level variables
+  if (logLevel !== 'none') {
+    declVars.set('_proc_started_at', 'TIMESTAMPTZ := clock_timestamp()')
+    declVars.set('_traceparent', "TEXT := current_setting('app.traceparent', true)")
+    declVars.set('_span_id', "TEXT := encode(gen_random_bytes(8), 'hex')")
+  }
+  if (logLevel === 'step' || logLevel === 'debug') {
+    declVars.set('_proc_row_count', 'INTEGER')
+    declVars.set('_proc_steps', "JSONB[] := ARRAY[]::JSONB[]")
   }
 
   const catchHandlers = collectCatch(stmts)
@@ -390,7 +546,10 @@ export function compileProcedure(def: ProcedureDefinition, opts?: CompileOpts): 
     procName: def.name,
     tempTables: def.tempTables,
     vars: declVars,
-    debug: opts?.debug ?? false,
+    debug: effectiveDebug,
+    log: logLevel,
+    logTarget,
+    stepCounter: { value: 0 },
   }
 
   let declare = ''

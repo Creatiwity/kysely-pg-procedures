@@ -8,7 +8,7 @@ export interface TempTableHelper<TCols extends TempTableColumns = TempTableColum
   readonly ref: SqlFragment
   readonly instanceFilter: SqlFragment
   insert(values: { [K in keyof TCols]?: SqlFragment }): Statement
-  insertFrom(columns: ReadonlyArray<string & keyof TCols>, query: SqlFragment | Compilable): Statement
+  insertFrom(columns: ReadonlyArray<string & keyof TCols>, query: SqlFragment | Compilable, opts?: { label?: string }): Statement
   delete(where?: SqlFragment): Statement
   exists(where?: SqlFragment): SqlFragment
   notExists(where?: SqlFragment): SqlFragment
@@ -40,9 +40,9 @@ export function buildTempTableHelper<T extends TempTableDef>(def: T): TempTableH
       return { kind: 'tempInsert', table: def, values: values as Record<string, SqlFragment> }
     },
 
-    insertFrom(columns, query): Statement {
+    insertFrom(columns, query, opts): Statement {
       const fragment = isCompilable(query) ? toSqlFragment(query) : query
-      return { kind: 'tempInsertFrom', table: def, columns: [...columns] as string[], query: fragment }
+      return { kind: 'tempInsertFrom', table: def, columns: [...columns] as string[], query: fragment, label: opts?.label }
     },
 
     delete(where): Statement {

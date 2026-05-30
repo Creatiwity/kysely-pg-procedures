@@ -52,7 +52,7 @@ export type Statement =
   | { kind: 'if'; condition: SqlFragment; then: Statement[]; else?: Statement[] }
   | { kind: 'branch'; branches: Array<{ when: SqlFragment; then: Statement[] }>; else?: Statement[] }
   | { kind: 'case'; expr: SqlFragment; branches: Array<[string, Statement[]]>; else?: Statement[] }
-  | { kind: 'selectInto'; vars: Record<string, SqlFragment>; from: SqlFragment; strict?: boolean }
+  | { kind: 'selectInto'; vars: Record<string, SqlFragment>; from: SqlFragment; strict?: boolean; label?: string }
   | { kind: 'forRow'; rowVar: string; query: SqlFragment; body: Statement[] }
   | { kind: 'forIn'; var: string; from: SqlFragment; to: SqlFragment; body: Statement[] }
   | { kind: 'while'; condition: SqlFragment; body: Statement[] }
@@ -62,9 +62,9 @@ export type Statement =
   | { kind: 'return'; value?: SqlFragment }
   | { kind: 'raise'; level: RaiseLevel; message: string; args?: SqlFragment[] }
   | { kind: 'perform'; query: SqlFragment }
-  | { kind: 'raw'; sql: SqlFragment }
+  | { kind: 'raw'; sql: SqlFragment; label?: string }
   | { kind: 'catch'; handlers: CatchHandler[] }
-  | { kind: 'tempInsert'; table: TempTableDef; values: Record<string, SqlFragment> }
-  | { kind: 'tempInsertFrom'; table: TempTableDef; columns: string[]; query: SqlFragment }
-  | { kind: 'tempDelete'; table: TempTableDef; where?: SqlFragment }
+  | { kind: 'tempInsert'; table: TempTableDef; values: Record<string, SqlFragment>; label?: string }
+  | { kind: 'tempInsertFrom'; table: TempTableDef; columns: string[]; query: SqlFragment; label?: string }
+  | { kind: 'tempDelete'; table: TempTableDef; where?: SqlFragment; label?: string }
   | { kind: 'snapshot'; label: string }
