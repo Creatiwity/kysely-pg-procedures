@@ -349,4 +349,127 @@ describe('compileProcedure', () => {
     expect(output).toContain("'my_count'")
     expect(output).toContain("'after_count'")
   })
+
+  // -------------------------------------------------------------------------
+  // 13. log="info", logTarget="table": INSERT INTO _proc_log, _proc_started_at
+  // -------------------------------------------------------------------------
+  it('log="info" logTarget="table": emits _proc_started_at DECLARE and INSERT INTO _proc_log', () => {
+    const proc = defineProcedure(
+      { name: 'log_info_table_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { log: 'info', logTarget: 'table' })
+
+    expect(output).toContain('_proc_started_at')
+    expect(output).toContain('INSERT INTO _proc_log')
+    expect(output).not.toContain('pg_notify')
+    expect(output).not.toContain('INSERT INTO _proc_log_steps')
+  })
+
+  // -------------------------------------------------------------------------
+  // 14. log="info", logTarget="notify": pg_notify, no INSERT INTO _proc_log
+  // -------------------------------------------------------------------------
+  it('log="info" logTarget="notify": emits pg_notify, no INSERT INTO _proc_log', () => {
+    const proc = defineProcedure(
+      { name: 'log_info_notify_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { log: 'info', logTarget: 'notify' })
+
+    expect(output).toContain('pg_notify')
+    expect(output).not.toContain('INSERT INTO _proc_log')
+  })
+
+  // -------------------------------------------------------------------------
+  // 15. log="step": _proc_steps DECLARE, GET DIAGNOSTICS, step array append
+  // -------------------------------------------------------------------------
+  it('log="step": emits _proc_steps DECLARE, GET DIAGNOSTICS, and step array append', () => {
+    const proc = defineProcedure(
+      { name: 'log_step_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.execute(sql.raw('UPDATE orders SET processed = TRUE WHERE id = 1'))
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { log: 'step' })
+
+    expect(output).toContain('_proc_steps')
+    expect(output).toContain('JSONB[]')
+    expect(output).toContain('GET DIAGNOSTICS')
+    expect(output).toContain('_proc_steps := _proc_steps ||')
+  })
+
+  // -------------------------------------------------------------------------
+  // 16. log="info": _traceparent and _span_id in DECLARE
+  // -------------------------------------------------------------------------
+  it('log="info": injects _traceparent and _span_id in DECLARE', () => {
+    const proc = defineProcedure(
+      { name: 'log_traceparent_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { log: 'info' })
+
+    expect(output).toContain('_traceparent')
+    expect(output).toContain('_span_id')
+    expect(output).toContain('current_setting')
+  })
+
+  // -------------------------------------------------------------------------
+  // 17. log="none" (default): no _proc_log, no _proc_started_at
+  // -------------------------------------------------------------------------
+  it('log="none" (default): no _proc_log and no _proc_started_at in output', () => {
+    const proc = defineProcedure(
+      { name: 'log_none_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).not.toContain('_proc_log')
+    expect(output).not.toContain('_proc_started_at')
+  })
+
+  // -------------------------------------------------------------------------
+  // 18. db.execute with label: step_name in compiled step output (log="step")
+  // -------------------------------------------------------------------------
+  it('db.execute with label: step_name appears in step tracking output when log="step"', () => {
+    const proc = defineProcedure(
+      { name: 'log_step_label_fn' },
+      [],
+      {},
+      ({ db }) => {
+        db.execute(sql.raw('UPDATE orders SET processed = TRUE WHERE id = 1'), {
+          label: 'mark_processed',
+        })
+        db.return(db.NEW.id)
+      },
+    )
+
+    const output = compileProcedure(proc, { log: 'step' })
+
+    expect(output).toContain("'mark_processed'")
+    expect(output).toContain('step_name')
+  })
 })
