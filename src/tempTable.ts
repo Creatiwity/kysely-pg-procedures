@@ -69,6 +69,15 @@ export type TempTableMap<TTables extends TempTableDef[]> = {
   >
 }
 
+// Key used to access a temp table in the db context: alias if defined, else name.
+export type TempTableKey<T extends TempTableDef> = T['as'] extends string ? T['as'] : T['name']
+
+// Maps each temp table to its TempTableHelper, keyed by alias (or name as fallback).
+// This is the type added to DbContext via generics so db.myAlias is fully typed.
+export type TempTableAliasMap<TTables extends TempTableDef[]> = {
+  [K in TTables[number] as TempTableKey<K>]: TempTableHelper<K['columns']>
+}
+
 export function buildTempTableMap<TTables extends TempTableDef[]>(
   tables: TTables,
 ): TempTableMap<TTables> {

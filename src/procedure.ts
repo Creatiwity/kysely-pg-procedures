@@ -12,12 +12,17 @@ import type {
 import { sql } from './sql.js'
 import { buildDbContext } from './db-context.js'
 import type { DbContext } from './db-context.js'
+import type { TempTableAliasMap } from './tempTable.js'
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type ProcedureCallback = (ctx: { sql: typeof sql; db: DbContext }) => void
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ProcedureCallback<TTables extends TempTableDef[] = any[]> = (ctx: {
+  sql: typeof sql
+  db: DbContext<TempTableAliasMap<TTables>>
+}) => void
 
 export interface ProcedureOptions {
   name: string
@@ -67,11 +72,11 @@ export interface TriggerDefinition {
 // defineProcedure
 // ---------------------------------------------------------------------------
 
-export function defineProcedure(
+export function defineProcedure<TTables extends TempTableDef[] = []>(
   options: ProcedureOptions,
-  tempTables: TempTableDef[],
+  tempTables: TTables,
   vars: VarDecls,
-  body: ProcedureCallback,
+  body: ProcedureCallback<TTables>,
 ): ProcedureDefinition {
   return {
     _tag: 'Procedure',

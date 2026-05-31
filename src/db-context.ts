@@ -4,7 +4,7 @@ import { sql } from './sql.js'
 import { compileDb, isCompilable, toSqlFragment, extractFromClause } from './kysely-compile.js'
 import type { Compilable } from './kysely-compile.js'
 import { buildTempTableAliasMap } from './tempTable.js'
-import type { TempTableHelper } from './tempTable.js'
+import type { TempTableHelper, TempTableAliasMap } from './tempTable.js'
 import type { SelectQueryBuilder, AnyColumn } from 'kysely'
 
 // ---------------------------------------------------------------------------
@@ -15,6 +15,33 @@ import type { SelectQueryBuilder, AnyColumn } from 'kysely'
  * as an assignment target in db.set(). */
 export interface ColumnRef extends SqlFragment {
   readonly _colName: string
+}
+
+/**
+ * The type of db.NEW and db.OLD.
+ *
+ * - As a whole (db.NEW) it is a valid SqlFragment/ColumnRef — so db.return(db.NEW)
+ *   compiles to RETURN NEW without a type error.
+ * - Column access (db.NEW.label) returns ColumnRef | string; the string arm covers
+ *   the internal _tag / text / _colName properties of the proxy target.
+ */
+/**
+ * The type of db.NEW and db.OLD.
+ *
+ * - As a whole (db.NEW) it satisfies SqlFragment (has _tag + text), so
+ *   db.return(db.NEW) compiles to RETURN NEW without a type error.
+ * - Column access (db.NEW.label) returns any — TypeScript cannot express
+ *   "all string keys return ColumnRef except the internal _tag/text/_colName
+ *   which are strings" in a single index signature without conflicts.
+ *   The runtime behaviour is always correct: only actual column names return
+ *   a ColumnRef SqlFragment; the proxy target's own properties handle the rest.
+ */
+export interface RowProxy {
+  readonly _tag: 'sql'
+  readonly text: string
+  readonly _colName: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly [col: string]: any
 }
 
 /** Condition accepted by db.if():
@@ -42,13 +69,19 @@ export interface DbSelectBuilder {
   into(vars: Record<string, SqlFragment>, opts?: { strict?: boolean }): void
 }
 
-/** The imperative db context exposed to the procedure callback. */
-export interface DbContext {
-  /** Proxy — db.NEW.colName returns sql.raw('NEW."colName"') */
-  readonly NEW: Record<string, ColumnRef>
-  /** Proxy — db.OLD.colName returns sql.raw('OLD."colName"') */
-  readonly OLD: Record<string, ColumnRef>
-  /** Proxy — db.var.name returns sql.raw(name) for declared variables */
+/**
+ * The imperative db context exposed to the procedure callback.
+ *
+ * TAliases is the map of temp table helpers keyed by alias, produced by
+ * TempTableAliasMap<TTables> and intersected here so that db.myAlias is
+ * fully typed as TempTableHelper<columns>.
+ */
+export type DbContext<TAliases extends Record<string, unknown> = Record<never, never>> = {
+  /** Proxy — db.NEW itself is a RowProxy (compiles to NEW); db.NEW.col is a ColumnRef */
+  readonly NEW: RowProxy
+  /** Proxy — db.OLD itself is a RowProxy (compiles to OLD); db.OLD.col is a ColumnRef */
+  readonly OLD: RowProxy
+  /** Proxy — db.var.name returns a ColumnRef for a declared variable */
   readonly var: Record<string, ColumnRef>
 
   /** Assign: target := value; */
@@ -72,8 +105,8 @@ export interface DbContext {
   /** Execute a raw SQL statement */
   execute(query: SqlFragment | Compilable, opts?: { label?: string }): void
 
-  /** RETURN [value] */
-  return(value?: SqlFragment | ColumnRef | string | number): void
+  /** RETURN [value]; pass db.NEW or db.OLD to return the trigger row */
+  return(value?: SqlFragment | ColumnRef | RowProxy | string | number): void
 
   /** RAISE level 'msg' [, args] */
   raise(level: RaiseLevel, message: string, args?: Array<SqlFragment | ColumnRef>): void
@@ -86,10 +119,7 @@ export interface DbContext {
 
   /** Debug snapshot — only emitted when compiled with debug=true */
   snapshot(label: string): void
-
-  /** Temp table helpers — accessed as db[alias] */
-  [alias: string]: TempTableHelper | unknown
-}
+} & TAliases
 
 // ---------------------------------------------------------------------------
 // Statement stack
@@ -160,11 +190,11 @@ function valueToFragment(value: SqlFragment | string | number): SqlFragment {
 // Row proxy factory (NEW / OLD)
 // ---------------------------------------------------------------------------
 
-function makeRowProxy(rowName: 'NEW' | 'OLD'): Record<string, ColumnRef> {
-  // The target carries _tag/text/colName so that `db.NEW` itself is a valid
-  // SqlFragment (compiles to "NEW") when passed directly to db.return() etc.
-  const self: ColumnRef = { _tag: 'sql', text: rowName, _colName: rowName }
-  return new Proxy(self as unknown as Record<string, ColumnRef>, {
+function makeRowProxy(rowName: 'NEW' | 'OLD'): RowProxy {
+  // The target carries _tag/text/_colName so that db.NEW itself satisfies
+  // RowProxy (and therefore SqlFragment) when passed to db.return(db.NEW).
+  const self = { _tag: 'sql' as const, text: rowName, _colName: rowName }
+  return new Proxy(self as unknown as RowProxy, {
     get(target, prop: string | symbol): unknown {
       if (typeof prop !== 'string') return (target as unknown as Record<symbol, unknown>)[prop]
       if (prop === '_tag' || prop === 'text' || prop === '_colName') return (target as unknown as Record<string, unknown>)[prop]
@@ -237,10 +267,10 @@ function wrapHelperForPush(helper: TempTableHelper): TempTableHelper {
   }
 }
 
-export function buildDbContext(
-  tempTables: TempTableDef[],
+export function buildDbContext<TTables extends TempTableDef[]>(
+  tempTables: TTables,
   vars: VarDecls,
-): { db: DbContext; getStatements(): Statement[] } {
+): { db: DbContext<TempTableAliasMap<TTables>>; getStatements(): Statement[] } {
   const aliasMap: Record<string, TempTableHelper> = Object.fromEntries(
     Object.entries(buildTempTableAliasMap(tempTables)).map(([k, h]) => [k, wrapHelperForPush(h)])
   )
@@ -347,7 +377,7 @@ export function buildDbContext(
 
   // The db proxy: falls through to aliasMap for temp table aliases, delegates
   // everything else to dbMethods.
-  const db = new Proxy(dbMethods as unknown as DbContext, {
+  const db = new Proxy(dbMethods as unknown as DbContext<TempTableAliasMap<TTables>>, {
     get(target, prop: string | symbol) {
       if (typeof prop !== 'string') return undefined
 
@@ -371,6 +401,9 @@ export function buildDbContext(
   // (executeBody) when it calls captureBlock internally. Instead we expose a
   // controlled begin/end API via a closure-based approach.
 
+  // The Proxy's generic parameter can't be inferred by TypeScript from the target
+  // cast alone, so we use `as unknown as` to satisfy the declared return type.
+  // Runtime behaviour is correct: db[alias] falls through to aliasMap.
   return {
     db,
     getStatements,
@@ -383,5 +416,5 @@ export function buildDbContext(
         _stack.pop()
       }
     },
-  } as { db: DbContext; getStatements(): Statement[] } & { _runWithRootFrame: (cb: () => void) => void }
+  } as unknown as { db: DbContext<TempTableAliasMap<TTables>>; getStatements(): Statement[] } & { _runWithRootFrame: (cb: () => void) => void }
 }
