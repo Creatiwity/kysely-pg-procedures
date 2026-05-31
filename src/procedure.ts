@@ -10,8 +10,8 @@ import type {
   SqlFragment,
 } from './types.js'
 import { sql } from './sql.js'
-import { buildDbContext } from './db-context.js'
-import type { DbContext } from './db-context.js'
+import { buildDbContext, makeTypedRowRef } from './db-context.js'
+import type { DbContext, TypedRowRef } from './db-context.js'
 import type { TempTableAliasMap } from './tempTable.js'
 
 // ---------------------------------------------------------------------------
@@ -138,5 +138,94 @@ export function defineTrigger(
     referencing: options.referencing,
     columns: options.columns,
     procedure,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// defineRowTrigger — typed NEW/OLD factory for FOR EACH ROW triggers
+// ---------------------------------------------------------------------------
+
+/**
+ * Conditional row-ref availability based on trigger events:
+ * - INSERT or UPDATE → NEW is available
+ * - UPDATE or DELETE → OLD is available
+ */
+type RowRefs<TRow, TEvents extends readonly TriggerEvent[]> =
+  ([Extract<TEvents[number], 'INSERT' | 'UPDATE'>] extends [never] ? unknown : { NEW: TypedRowRef<TRow> }) &
+  ([Extract<TEvents[number], 'UPDATE' | 'DELETE'>] extends [never] ? unknown : { OLD: TypedRowRef<TRow> })
+
+export interface RowTriggerOptions<TEvents extends readonly TriggerEvent[] = readonly TriggerEvent[]> {
+  /** Name of the trigger */
+  name: string
+  /** Name of the PL/pgSQL function created for this trigger */
+  procedureName: string
+  table: string
+  timing: TriggerTiming
+  /** Pass `as const` for precise event-conditional typing of NEW/OLD */
+  events: TEvents
+  when?: SqlFragment
+  columns?: string[]
+}
+
+/**
+ * Higher-level factory for FOR EACH ROW triggers with full type safety.
+ *
+ * Usage (curried to allow partial generic inference):
+ *
+ * ```ts
+ * interface Item { id: string; label: string; score: number }
+ *
+ * const trigger = defineRowTrigger<Item>()(
+ *   { name: 'trg_score', procedureName: 'fn_score', table: 'items',
+ *     timing: 'BEFORE', events: ['INSERT'] as const },
+ *   [],   // temp tables
+ *   {},   // vars
+ *   ({ db, NEW }) => {
+ *     db.set(NEW.score, sql`char_length(${NEW.label}) * 10`)
+ *     db.return(NEW)
+ *   },
+ * )
+ * ```
+ *
+ * - `NEW.score` and `NEW.label` are typed as `ColumnRef` (not `any`)
+ * - `db.return(NEW)` compiles without error
+ * - With `as const` on events, `NEW`/`OLD` are only available when the
+ *   corresponding event is declared (INSERT/UPDATE → NEW, UPDATE/DELETE → OLD)
+ */
+export function defineRowTrigger<TRow>() {
+  return function <
+    TTables extends TempTableDef[] = [],
+    const TEvents extends readonly TriggerEvent[] = readonly TriggerEvent[],
+  >(
+    options: RowTriggerOptions<TEvents>,
+    tempTables: TTables,
+    vars: VarDecls,
+    body: (
+      ctx: { sql: typeof sql; db: DbContext<TempTableAliasMap<TTables>> } & RowRefs<TRow, TEvents>,
+    ) => void,
+  ): TriggerDefinition {
+    const proc = defineProcedure(
+      { name: options.procedureName },
+      tempTables,
+      vars,
+      ({ sql: s, db }) => {
+        const NEW = makeTypedRowRef<TRow>('NEW')
+        const OLD = makeTypedRowRef<TRow>('OLD')
+        // Cast: runtime always provides NEW+OLD; conditional typing is TS-only
+        body({ sql: s, db, NEW, OLD } as Parameters<typeof body>[0])
+      },
+    )
+    return defineTrigger(
+      {
+        name: options.name,
+        table: options.table,
+        timing: options.timing,
+        events: [...options.events] as TriggerEvent[],
+        forEach: 'ROW',
+        when: options.when,
+        columns: options.columns,
+      },
+      proc,
+    )
   }
 }

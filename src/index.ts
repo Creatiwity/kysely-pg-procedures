@@ -3,12 +3,13 @@ export { sql } from './sql.js'
 export { defineTempTable } from './tempTable.js'
 export type { TempTableHelper, TempTableMap, TempTableAliasMap, TempTableKey } from './tempTable.js'
 
-export { defineProcedure, defineTrigger } from './procedure.js'
+export { defineProcedure, defineTrigger, defineRowTrigger } from './procedure.js'
 export type {
   ProcedureDefinition,
   TriggerDefinition,
   ProcedureOptions,
   TriggerOptions,
+  RowTriggerOptions,
   ProcedureCallback,
 } from './procedure.js'
 
@@ -23,7 +24,8 @@ export type { ProcLogEntry, ProcLogStep } from './notify-listener.js'
 export { compileDb, toSqlFragment, extractFromClause, isCompilable } from './kysely-compile.js'
 export type { Compilable } from './kysely-compile.js'
 
-export type { ColumnRef, RowProxy, DbContext, DbSelectBuilder, IfCondition } from './db-context.js'
+export type { ColumnRef, RowProxy, TypedRowRef, DbContext, DbSelectBuilder, IfCondition } from './db-context.js'
+export { makeTypedRowRef } from './db-context.js'
 
 export type {
   SqlFragment,

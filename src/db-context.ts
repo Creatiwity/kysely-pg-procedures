@@ -18,6 +18,35 @@ export interface ColumnRef extends SqlFragment {
 }
 
 /**
+ * A typed reference to a trigger row (NEW or OLD), parameterised by the table
+ * schema type TRow.
+ *
+ * - ref itself    → ColumnRef  → db.return(NEW) compiles to RETURN NEW
+ * - ref.colName   → ColumnRef  → db.set(NEW.score, ...) with full type safety
+ *
+ * Uses a mapped type (not an index signature) so column access is precise:
+ * TypedRowRef<{ label: string; score: number }> gives .label and .score as
+ * ColumnRef without any catch-all unknown or string in the value type.
+ */
+export type TypedRowRef<TRow> = ColumnRef & {
+  readonly [K in keyof TRow & string]: ColumnRef
+}
+
+/** @internal Create a TypedRowRef proxy for NEW or OLD. */
+export function makeTypedRowRef<TRow>(rowName: 'NEW' | 'OLD'): TypedRowRef<TRow> {
+  const self = { _tag: 'sql' as const, text: rowName, _colName: rowName }
+  return new Proxy(self as unknown as TypedRowRef<TRow>, {
+    get(target, prop: string | symbol): unknown {
+      if (typeof prop !== 'string') return (target as unknown as Record<symbol, unknown>)[prop]
+      if (prop === '_tag' || prop === 'text' || prop === '_colName') {
+        return (target as unknown as Record<string, unknown>)[prop]
+      }
+      return makeColumnRef(`${rowName}."${prop}"`, prop)
+    },
+  })
+}
+
+/**
  * The type of db.NEW and db.OLD.
  *
  * - As a whole (db.NEW) it is a valid SqlFragment/ColumnRef — so db.return(db.NEW)

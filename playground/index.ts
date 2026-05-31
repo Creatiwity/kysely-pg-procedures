@@ -11,6 +11,7 @@
 
 import { Pool } from 'pg'
 import {
+  defineRowTrigger,
   defineProcedure,
   defineTrigger,
   defineTempTable,
@@ -32,26 +33,31 @@ const logTarget = (targetIdx !== -1 ? args[targetIdx + 1] : 'table') as 'table' 
 
 // ─── Define your procedures here ──────────────────────────────────────────────
 
-// Example 1 — BEFORE INSERT ROW trigger: auto-set score from label length
-const scoreProc = defineProcedure(
-  { name: 'playground_score_proc' },
-  [],
-  {},
-  ({ sql: s, db }) => {
-    db.set(db.NEW.score, sql`char_length(${db.NEW.label}) * 10`)
-    db.return(db.NEW)
-  },
-)
+// Table schema — used to type NEW/OLD in row triggers
+interface PlaygroundItem {
+  id: string
+  label: string
+  score: number
+  audit_flag: boolean
+}
 
-const scoreTrigger = defineTrigger(
+// Example 1 — BEFORE INSERT ROW trigger using defineRowTrigger<Schema>()
+// NEW.label and NEW.score are typed as ColumnRef (no `any`, full autocomplete)
+// OLD is not available (INSERT only → TypeScript error if you try to use it)
+const scoreTrigger = defineRowTrigger<PlaygroundItem>()(
   {
     name: 'playground_score_trigger',
+    procedureName: 'playground_score_proc',
     table: 'playground_items',
     timing: 'BEFORE',
-    events: ['INSERT'],
-    forEach: 'ROW',
+    events: ['INSERT'] as const,
   },
-  scoreProc,
+  [],
+  {},
+  ({ db, NEW }) => {
+    db.set(NEW.score, sql`char_length(${NEW.label}) * 10`)
+    db.return(NEW)
+  },
 )
 
 // Example 2 — AFTER UPDATE STATEMENT trigger with temp table
