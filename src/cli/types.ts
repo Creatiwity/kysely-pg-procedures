@@ -1,6 +1,6 @@
 export interface KppBlock {
   name: string
-  kind: 'function' | 'trigger'
+  kind: 'function' | 'trigger' | 'rls-enable' | 'rls-policy'
   hash: string
   content: string
   migrationFile: string
@@ -13,7 +13,7 @@ export interface KppDownBlock {
 }
 
 export interface ManifestEntry {
-  kind: 'function' | 'trigger'
+  kind: 'function' | 'trigger' | 'rls-enable' | 'rls-policy'
   hash: string
   lastChanged: string
   migrationFile: string
@@ -35,14 +35,14 @@ export interface ProcConfig {
 
 export interface CompiledDef {
   name: string
-  kind: 'function' | 'trigger'
+  kind: 'function' | 'trigger' | 'rls-enable' | 'rls-policy'
   sql: string
   hash: string
 }
 
 export interface StatusEntry {
   name: string
-  kind: 'function' | 'trigger'
+  kind: 'function' | 'trigger' | 'rls-enable' | 'rls-policy'
   status: 'unchanged' | 'modified' | 'not-migrated' | 'orphan' | 'tampered' | 'conflict'
   sourceHash?: string
   manifestHash?: string

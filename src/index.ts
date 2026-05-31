@@ -18,6 +18,29 @@ export type { CompileOpts } from './compiler.js'
 
 export { logSetupSql } from './log-setup.js'
 
+export {
+  defineSessionVars,
+  enableRls,
+  definePolicy,
+  compileRlsEnable,
+  compilePolicyBlock,
+} from './rls.js'
+export type {
+  SessionVarDefs,
+  SessionVarType,
+  SessionVarsDef,
+  RlsEnableOpts,
+  RlsEnableDef,
+  PolicyCommand,
+  PolicyPermissiveness,
+  PolicyOpts,
+  PolicyDef,
+  PolicyBody,
+  PolicyBodyCtx,
+  ColProxy,
+  SessionProxy,
+} from './rls.js'
+
 export { createProcLogListener } from './notify-listener.js'
 export type { ProcLogEntry, ProcLogStep } from './notify-listener.js'
 

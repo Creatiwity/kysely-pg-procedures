@@ -40,7 +40,7 @@ export async function rebuildManifest(migrationsDir: string, rebuiltAt: string):
   }
 
   // Track latest block per name, plus all files it appeared in for conflict detection
-  const latestBlock = new Map<string, { hash: string; kind: 'function' | 'trigger'; lastChanged: string; migrationFile: string }>()
+  const latestBlock = new Map<string, { hash: string; kind: 'function' | 'trigger' | 'rls-enable' | 'rls-policy'; lastChanged: string; migrationFile: string }>()
   const allFiles = new Map<string, string[]>()
 
   for (const filename of files) {

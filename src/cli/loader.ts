@@ -1,6 +1,7 @@
 import { readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { compileProcedure, compileTrigger } from '../../src/compiler.js'
+import { compilePolicyBlock, compileRlsEnable } from '../../src/rls.js'
 import { hashSql } from './hash.js'
 import type { CompiledDef } from './types.js'
 
@@ -128,6 +129,29 @@ export async function loadCompiledDefs(globs: string[], cwd: string): Promise<Co
             kind: 'function',
             sql: fnSql,
             hash: hashSql(fnSql),
+          })
+        }
+      } else if (d._tag === 'RlsEnable') {
+        const rlsSql = compileRlsEnable(def as any)
+        const table: string = (def as any).table
+        const rlsName = 'rls:' + table
+        if (!byName.has(rlsName)) {
+          byName.set(rlsName, {
+            name: rlsName,
+            kind: 'rls-enable',
+            sql: rlsSql,
+            hash: hashSql(rlsSql),
+          })
+        }
+      } else if (d._tag === 'Policy') {
+        const polSql = compilePolicyBlock(def as any)
+        const polName = 'policy:' + (def as any).opts.name
+        if (!byName.has(polName)) {
+          byName.set(polName, {
+            name: polName,
+            kind: 'rls-policy',
+            sql: polSql,
+            hash: hashSql(polSql),
           })
         }
       }

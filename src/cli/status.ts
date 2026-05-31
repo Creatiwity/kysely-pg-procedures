@@ -195,7 +195,10 @@ export async function runStatus(
   if (counts.tampered) parts.push(`${counts.tampered} tampered`)
   if (counts.conflict) parts.push(`${counts.conflict} conflict`)
 
-  console.log(parts.length ? parts.join('  |  ') : 'No procedures found.')
+  const procCount = compiledDefs.filter((d) => d.kind === 'function' || d.kind === 'trigger').length
+  const rlsCount = compiledDefs.filter((d) => d.kind === 'rls-enable' || d.kind === 'rls-policy').length
+  console.log(`Source files: ${procCount} procedures, ${rlsCount} RLS policies found`)
+  console.log(parts.length ? parts.join('  |  ') : 'No entries found.')
 
   const ok = entries.every((e) => e.status === 'unchanged')
   return { ok, entries }

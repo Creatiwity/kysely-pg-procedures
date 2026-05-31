@@ -11,7 +11,7 @@ export function parseKppBlocks(fileContent: string, migrationFile: string): KppB
   const lines = fileContent.split('\n')
   const blocks: KppBlock[] = []
 
-  let current: { name: string; kind: 'function' | 'trigger'; hash: string; lines: string[] } | null = null
+  let current: { name: string; kind: 'function' | 'trigger' | 'rls-enable' | 'rls-policy'; hash: string; lines: string[] } | null = null
 
   for (const line of lines) {
     if (current === null) {
@@ -19,7 +19,7 @@ export function parseKppBlocks(fileContent: string, migrationFile: string): KppB
       if (beginMatch) {
         current = {
           name: beginMatch[1]!,
-          kind: beginMatch[2] as 'function' | 'trigger',
+          kind: beginMatch[2] as 'function' | 'trigger' | 'rls-enable' | 'rls-policy',
           hash: beginMatch[3]!,
           lines: [],
         }

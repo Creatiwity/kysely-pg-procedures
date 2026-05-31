@@ -36,19 +36,23 @@ export async function runGenerate(
     return
   }
 
-  // Build UP blocks: functions first, triggers last
+  // Build UP blocks: rls-enable first, rls-policy next, functions, triggers last
+  const upRlsEnable = toMigrate.filter((d) => d.kind === 'rls-enable')
+  const upRlsPolicy = toMigrate.filter((d) => d.kind === 'rls-policy')
   const upFunctions = toMigrate.filter((d) => d.kind === 'function')
   const upTriggers = toMigrate.filter((d) => d.kind === 'trigger')
-  const upOrdered = [...upFunctions, ...upTriggers]
+  const upOrdered = [...upRlsEnable, ...upRlsPolicy, ...upFunctions, ...upTriggers]
 
   const upBlocks = upOrdered.map((def) =>
     generateKppUpBlock(def.name, def.kind, def.hash, def.sql),
   )
 
-  // Build DOWN blocks: triggers first, then functions (reverse of up)
+  // Build DOWN blocks: triggers first, then functions, then drop policies, then disable rls (reverse of up)
   const downTriggers = upTriggers.slice().reverse()
   const downFunctions = upFunctions.slice().reverse()
-  const downOrdered = [...downTriggers, ...downFunctions]
+  const downRlsPolicy = upRlsPolicy.slice().reverse()
+  const downRlsEnable = upRlsEnable.slice().reverse()
+  const downOrdered = [...downTriggers, ...downFunctions, ...downRlsPolicy, ...downRlsEnable]
 
   const absDir = resolve(process.cwd(), config.migrations)
 
@@ -85,7 +89,7 @@ export async function runGenerate(
     const isNew = !manifestEntry
 
     let downSql: string
-    if (!isNew) {
+    if (!isNew && def.kind !== 'rls-policy' && def.kind !== 'rls-enable') {
       // Modified: find last KPP block content across migration files
       const previousSql = getPreviousSql(def.name)
       if (previousSql !== null) {
@@ -94,6 +98,7 @@ export async function runGenerate(
         downSql = buildDropSql(def)
       }
     } else {
+      // New entries, rls-policy (no REPLACE exists), or rls-enable: always drop
       downSql = buildDropSql(def)
     }
 
@@ -155,6 +160,19 @@ function buildDropSql(def: CompiledDef): string {
     const match = /\bON\s+"([^"]+)"/i.exec(def.sql)
     const table = match ? match[1] : 'unknown_table'
     return `DROP TRIGGER IF EXISTS "${def.name}" ON "${table}";`
+  }
+  if (def.kind === 'rls-enable') {
+    // def.name is "rls:<table>"
+    const table = def.name.slice('rls:'.length)
+    return `ALTER TABLE "${table}" DISABLE ROW LEVEL SECURITY;`
+  }
+  if (def.kind === 'rls-policy') {
+    // Extract table name from compiled SQL: ON "tablename"
+    const match = /\bON\s+"([^"]+)"/i.exec(def.sql)
+    const table = match ? match[1] : 'unknown_table'
+    // def.name is "policy:<policyname>"
+    const policyName = def.name.slice('policy:'.length)
+    return `DROP POLICY IF EXISTS "${policyName}" ON "${table}";`
   }
   return `DROP FUNCTION IF EXISTS ${def.name}();`
 }
