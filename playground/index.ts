@@ -1,6 +1,9 @@
 /**
  * kysely-pg-procedures — Playground
  *
+ * Procedure definitions live in playground/procedures.ts (pure, no side effects).
+ * This script compiles them and optionally applies to a local PG instance.
+ *
  * Usage:
  *   npm run playground              → compile SQL, print, apply to local PG
  *   npm run playground -- --dry     → compile SQL, print only (no DB)
@@ -10,17 +13,8 @@
  */
 
 import { Pool } from 'pg'
-import {
-  defineRowTrigger,
-  defineRowProcedure,
-  defineTrigger,
-  defineTempTable,
-  compileAll,
-  snapshotSetupSql,
-  logSetupSql,
-  sql,
-  ksql,  // Kysely's sql tag — use inside query builders (.where, .select, ...)
-} from '../src/index.js'
+import { compileAll, snapshotSetupSql, logSetupSql } from '../src/index.js'
+import triggers from './procedures.js'
 
 // ─── Parse CLI args ────────────────────────────────────────────────────────────
 
@@ -32,116 +26,10 @@ const log = (logIdx !== -1 ? args[logIdx + 1] : 'none') as 'none' | 'info' | 'st
 const targetIdx = args.indexOf('--target')
 const logTarget = (targetIdx !== -1 ? args[targetIdx + 1] : 'table') as 'table' | 'notify'
 
-// ─── DB schema — one type, no duplication ────────────────────────────────────
-
-// Declare once; table names are type-checked at every defineRowTrigger call.
-type DB = {
-  playground_items: {
-    id: string
-    label: string
-    score: number
-    audit_flag: boolean
-  }
-}
-
-// ─── Define your procedures here ──────────────────────────────────────────────
-
-// Example 1 — BEFORE INSERT, inline (proc + trigger in one call).
-// 'playground_items' deduces the row type from DB — no <RowType> duplication.
-// OLD is unavailable (events: ['INSERT'] as const → TypeScript error if used).
-const scoreTrigger = defineRowTrigger<DB>()(
-  'playground_items',
-  {
-    name: 'playground_score_trigger',
-    procedureName: 'playground_score_proc',
-    timing: 'BEFORE',
-    events: ['INSERT'] as const,
-  },
-  [],
-  {},
-  ({ db, NEW }) => {
-    db.set(NEW.score, sql`char_length(${NEW.label}) * 10`)
-    db.return(NEW)
-  },
-)
-
-// Example 2 — AFTER UPDATE STATEMENT trigger with temp table.
-// 2-step approach: defineRowProcedure (typed NEW/OLD) + defineTrigger separately.
-// Uses Kysely query builders in insertFrom and execute — no raw SQL blobs.
-const modifiedTable = defineTempTable(
-  'PlaygroundModifiedItems',
-  {
-    itemId: { type: 'uuid', nullable: false },
-    oldScore: { type: 'integer', nullable: true },
-    newScore: { type: 'integer', nullable: true },
-  },
-  { as: 'modified' },
-)
-
-// defineRowProcedure: table name deduces row type, both NEW and OLD available.
-const auditProc = defineRowProcedure<DB>()(
-  'playground_items',
-  { name: 'playground_audit_proc' },
-  [modifiedTable],
-  {},
-  ({ db }) => {
-    // insertFrom with Kysely query builder — no raw SQL
-    // insertFrom with Kysely query builder.
-    // Use ksql (Kysely's sql tag) for raw expressions inside query builders.
-    // Use our sql for statement fragments outside of query builders.
-    db.modified.insertFrom(
-      ['itemId', 'oldScore', 'newScore'],
-      db
-        .selectFrom('inserted as ins')
-        .innerJoin('removed as rem', join => join.onRef('ins.id', '=', 'rem.id'))
-        .where(ksql`ins."score" IS DISTINCT FROM rem."score"`)
-        .select([
-          ksql`ins."id"`.as('itemId'),
-          ksql`rem."score"`.as('oldScore'),
-          ksql`ins."score"`.as('newScore'),
-        ]),
-    )
-
-    db.if(db.modified.notExists(), () => {
-      db.modified.delete()
-      db.return(sql`NULL`)
-    })
-
-    db.snapshot('after_collect')
-
-    // execute with Kysely updateTable — filter() now returns RawBuilder<unknown>
-    // so it works directly in Kysely's .where() AND in our sql template.
-    db.execute(
-      db
-        .updateTable('playground_items')
-        .set({ audit_flag: ksql`TRUE` })
-        .from('PlaygroundModifiedItems as m')
-        .whereRef('playground_items.id', '=', 'm.itemId')
-        .where(db.modified.filter('m')),
-      { label: 'flag_modified_items' },
-    )
-
-    db.return(sql`NULL`)
-  },
-)
-
-// defineTrigger receives the typed proc
-const auditTrigger = defineTrigger(
-  {
-    name: 'playground_audit_trigger',
-    table: 'playground_items',
-    timing: 'AFTER',
-    events: ['UPDATE'],
-    forEach: 'STATEMENT',
-    referencing: { old: 'removed', new: 'inserted' },
-  },
-  auditProc,
-)
-
 // ─── Compile ──────────────────────────────────────────────────────────────────
 
 const opts = { debug, log, logTarget }
-const compiled = compileAll([scoreTrigger, auditTrigger], opts)
+const compiled = compileAll(triggers, opts)
 
 console.log('\n' + '─'.repeat(72))
 console.log('COMPILED SQL')
@@ -182,7 +70,6 @@ const client = await pool.connect()
 try {
   await client.query('BEGIN')
 
-  // Create test table if needed
   await client.query(`
     CREATE TABLE IF NOT EXISTS playground_items (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -195,17 +82,15 @@ try {
   if (log !== 'none') await client.query(logSetupSql())
   if (debug || log === 'debug') await client.query(snapshotSetupSql())
 
-  // Apply procedures + triggers
   await client.query(compiled)
 
-  // Smoke test: insert a row, verify trigger fired
   const { rows } = await client.query<{ label: string; score: number }>(
     `INSERT INTO playground_items (label) VALUES ('hello') RETURNING label, score`,
   )
   const row = rows[0]
 
   console.log('\n' + '─'.repeat(72))
-  console.log('SMOKE TEST — INSERT INTO playground_items (label) VALUES (\'hello\')')
+  console.log("SMOKE TEST — INSERT INTO playground_items (label) VALUES ('hello')")
   console.log('─'.repeat(72))
   console.log(`  label: ${row?.label}`)
   console.log(`  score: ${row?.score}  (expected: ${('hello'.length * 10)})`)

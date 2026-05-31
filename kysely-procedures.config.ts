@@ -1,7 +1,7 @@
 import type { ProcConfig } from './src/cli/types.js'
 
 const config: Partial<ProcConfig> = {
-  procedures: ['playground/**/*.ts'],
+  procedures: ['playground/procedures.ts'],
   manifest: 'kysely-procedures.json',
   migrations: 'playground/migrations/',
 }

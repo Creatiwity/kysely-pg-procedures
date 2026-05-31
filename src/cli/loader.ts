@@ -51,19 +51,29 @@ function walkDir(dir: string): string[] {
 }
 
 function expandGlob(pattern: string, cwd: string): string[] {
-  // Determine fixed prefix (portion before any wildcard)
+  const absolute = resolve(cwd, pattern)
+
+  // No wildcard — treat as a direct file reference
+  if (!pattern.includes('*')) {
+    try {
+      const st = statSync(absolute)
+      if (st.isFile() && absolute.endsWith('.ts')) return [absolute]
+    } catch {
+      // file doesn't exist
+    }
+    return []
+  }
+
+  // Has wildcards — find the fixed prefix directory and walk from there
   const parts = pattern.split('/')
-  let fixedParts: string[] = []
+  const fixedParts: string[] = []
   for (const part of parts) {
     if (part.includes('*')) break
     fixedParts.push(part)
   }
-  const baseDir = resolve(cwd, fixedParts.join('/'))
+  const baseDir = resolve(cwd, fixedParts.length > 0 ? fixedParts.join('/') : '.')
   const allFiles = walkDir(baseDir)
-
-  const absolutePattern = resolve(cwd, pattern)
-  const regex = globToRegex(absolutePattern)
-
+  const regex = globToRegex(absolute)
   return allFiles.filter((f) => f.endsWith('.ts') && regex.test(f))
 }
 

@@ -8,7 +8,7 @@ const defaults: ProcConfig = {
 }
 
 export async function loadConfig(configPath?: string): Promise<ProcConfig> {
-  const target = configPath ?? 'kpp.config.ts'
+  const target = configPath ?? 'kysely-procedures.config.ts'
   const absolute = resolve(process.cwd(), target)
   const mod = await import(absolute)
   const userConfig: Partial<ProcConfig> = mod.default ?? {}
