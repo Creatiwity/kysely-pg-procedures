@@ -109,15 +109,17 @@ const auditProc = defineRowProcedure<DB>()(
 
     db.snapshot('after_collect')
 
-    // execute with our sql tag — db.modified.filter() returns our SqlFragment,
-    // not a Kysely expression, so it's used here in the statement form.
-    // (Using it in a Kysely .where() would require filter to return ksql.raw(...))
-    db.execute(sql`
-      UPDATE "playground_items" SET "audit_flag" = TRUE
-      FROM "PlaygroundModifiedItems" AS m
-      WHERE "playground_items"."id" = m."itemId"
-        AND ${db.modified.filter('m')}
-    `, { label: 'flag_modified_items' })
+    // execute with Kysely updateTable — filter() now returns RawBuilder<unknown>
+    // so it works directly in Kysely's .where() AND in our sql template.
+    db.execute(
+      db
+        .updateTable('playground_items')
+        .set({ audit_flag: ksql`TRUE` })
+        .from('PlaygroundModifiedItems as m')
+        .whereRef('playground_items.id', '=', 'm.itemId')
+        .where(db.modified.filter('m')),
+      { label: 'flag_modified_items' },
+    )
 
     db.return(sql`NULL`)
   },

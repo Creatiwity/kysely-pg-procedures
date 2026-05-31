@@ -146,6 +146,18 @@ export type DbContext<TAliases extends Record<string, unknown> = Record<never, n
   /** PERFORM query */
   perform(query: SqlFragment | Compilable): void
 
+  /**
+   * Type-safe shortcut for calling a named procedure or function defined with
+   * defineProcedure / defineRowProcedure.
+   *
+   * db.invoke(myProc)             → PERFORM my_proc_name();
+   * db.invoke(myFn, [db.var.qty]) → PERFORM my_fn(qty);
+   *
+   * Note: PostgreSQL trigger functions (RETURNS TRIGGER) cannot be called via
+   * PERFORM outside a trigger context — use invoke only for RETURNS VOID helpers.
+   */
+  invoke(proc: { readonly name: string }, args?: SqlFragment[]): void
+
   /** Debug snapshot — only emitted when compiled with debug=true */
   snapshot(label: string): void
 } & TAliases
@@ -397,6 +409,11 @@ export function buildDbContext<TTables extends TempTableDef[]>(
 
     perform(query: SqlFragment | Compilable): void {
       push({ kind: 'perform', query: toSqlFragment(query) })
+    },
+
+    invoke(proc: { readonly name: string }, args?: SqlFragment[]): void {
+      const argList = args?.map(a => a.text).join(', ') ?? ''
+      push({ kind: 'perform', query: sql.raw(`${proc.name}(${argList})`) })
     },
 
     snapshot(label: string): void {
