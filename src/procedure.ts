@@ -154,30 +154,31 @@ type RowRefs<TRow, TEvents extends readonly TriggerEvent[]> =
   ([Extract<TEvents[number], 'INSERT' | 'UPDATE'>] extends [never] ? unknown : { NEW: TypedRowRef<TRow> }) &
   ([Extract<TEvents[number], 'UPDATE' | 'DELETE'>] extends [never] ? unknown : { OLD: TypedRowRef<TRow> })
 
+/** Options for defineRowTrigger — table is a separate first arg for schema-based type inference. */
 export interface RowTriggerOptions<TEvents extends readonly TriggerEvent[] = readonly TriggerEvent[]> {
-  /** Name of the trigger */
   name: string
-  /** Name of the PL/pgSQL function created for this trigger */
   procedureName: string
-  table: string
   timing: TriggerTiming
-  /** Pass `as const` for precise event-conditional typing of NEW/OLD */
+  /** Pass `as const` for event-conditional typing of NEW/OLD */
   events: TEvents
   when?: SqlFragment
   columns?: string[]
 }
 
 /**
- * Higher-level factory for FOR EACH ROW triggers with full type safety.
+ * Factory for FOR EACH ROW triggers with full schema-based type safety.
  *
- * Usage (curried to allow partial generic inference):
+ * The first generic is your DB schema map (table name → row type). The table
+ * name is the first argument and acts as both the SQL table name and the key to
+ * look up the row type — eliminating duplication between `<RowType>` and the
+ * `table` string.
  *
  * ```ts
- * interface Item { id: string; label: string; score: number }
+ * type DB = { items: { id: string; label: string; score: number } }
  *
- * const trigger = defineRowTrigger<Item>()(
- *   { name: 'trg_score', procedureName: 'fn_score', table: 'items',
- *     timing: 'BEFORE', events: ['INSERT'] as const },
+ * const trigger = defineRowTrigger<DB>()(
+ *   'items',                                       // table — deduces row type from DB
+ *   { name: 'trg_score', procedureName: 'fn_score', timing: 'BEFORE', events: ['INSERT'] as const },
  *   [],   // temp tables
  *   {},   // vars
  *   ({ db, NEW }) => {
@@ -187,21 +188,20 @@ export interface RowTriggerOptions<TEvents extends readonly TriggerEvent[] = rea
  * )
  * ```
  *
- * - `NEW.score` and `NEW.label` are typed as `ColumnRef` (not `any`)
- * - `db.return(NEW)` compiles without error
- * - With `as const` on events, `NEW`/`OLD` are only available when the
- *   corresponding event is declared (INSERT/UPDATE → NEW, UPDATE/DELETE → OLD)
+ * With `as const` on events: NEW available for INSERT/UPDATE, OLD for UPDATE/DELETE.
  */
-export function defineRowTrigger<TRow>() {
+export function defineRowTrigger<TSchema extends Record<string, unknown>>() {
   return function <
+    TTable extends keyof TSchema & string,
     TTables extends TempTableDef[] = [],
     const TEvents extends readonly TriggerEvent[] = readonly TriggerEvent[],
   >(
+    table: TTable,
     options: RowTriggerOptions<TEvents>,
     tempTables: TTables,
     vars: VarDecls,
     body: (
-      ctx: { sql: typeof sql; db: DbContext<TempTableAliasMap<TTables>> } & RowRefs<TRow, TEvents>,
+      ctx: { sql: typeof sql; db: DbContext<TempTableAliasMap<TTables>> } & RowRefs<TSchema[TTable], TEvents>,
     ) => void,
   ): TriggerDefinition {
     const proc = defineProcedure(
@@ -209,16 +209,15 @@ export function defineRowTrigger<TRow>() {
       tempTables,
       vars,
       ({ sql: s, db }) => {
-        const NEW = makeTypedRowRef<TRow>('NEW')
-        const OLD = makeTypedRowRef<TRow>('OLD')
-        // Cast: runtime always provides NEW+OLD; conditional typing is TS-only
+        const NEW = makeTypedRowRef<TSchema[TTable]>('NEW')
+        const OLD = makeTypedRowRef<TSchema[TTable]>('OLD')
         body({ sql: s, db, NEW, OLD } as Parameters<typeof body>[0])
       },
     )
     return defineTrigger(
       {
         name: options.name,
-        table: options.table,
+        table,
         timing: options.timing,
         events: [...options.events] as TriggerEvent[],
         forEach: 'ROW',
@@ -226,6 +225,55 @@ export function defineRowTrigger<TRow>() {
         columns: options.columns,
       },
       proc,
+    )
+  }
+}
+
+/**
+ * 2-step variant: create only the PL/pgSQL function (no trigger DDL).
+ * Use when the same function is shared across multiple triggers, or when you
+ * need the procedure name defined separately before attaching a trigger.
+ *
+ * Both NEW and OLD are always available in the body — the trigger's events
+ * determine which row ref PostgreSQL actually populates at runtime.
+ *
+ * ```ts
+ * const proc = defineRowProcedure<DB>()('items', { name: 'fn_score' }, [], {}, ({ NEW }) => {
+ *   db.set(NEW.score, sql`char_length(${NEW.label}) * 10`)
+ *   db.return(NEW)
+ * })
+ *
+ * const trigger = defineTrigger({
+ *   name: 'trg_score', table: 'items', timing: 'BEFORE',
+ *   events: ['INSERT'], forEach: 'ROW',
+ * }, proc)
+ * ```
+ */
+export function defineRowProcedure<TSchema extends Record<string, unknown>>() {
+  return function <
+    TTable extends keyof TSchema & string,
+    TTables extends TempTableDef[] = [],
+  >(
+    _table: TTable,   // used only for type inference — not emitted in SQL
+    options: ProcedureOptions,
+    tempTables: TTables,
+    vars: VarDecls,
+    body: (ctx: {
+      sql: typeof sql
+      db: DbContext<TempTableAliasMap<TTables>>
+      NEW: TypedRowRef<TSchema[TTable]>
+      OLD: TypedRowRef<TSchema[TTable]>
+    }) => void,
+  ): ProcedureDefinition {
+    return defineProcedure(
+      options,
+      tempTables,
+      vars,
+      ({ sql: s, db }) => {
+        const NEW = makeTypedRowRef<TSchema[TTable]>('NEW')
+        const OLD = makeTypedRowRef<TSchema[TTable]>('OLD')
+        body({ sql: s, db, NEW, OLD })
+      },
     )
   }
 }

@@ -15,12 +15,24 @@ export interface TempTableHelper<TCols extends TempTableColumns = TempTableColum
   filter(alias: string): SqlFragment
 }
 
+// Overload 1: no alias → TAs = undefined (key in db context = table name)
 export function defineTempTable<TName extends string, TCols extends TempTableColumns>(
   name: TName,
   columns: TCols,
-  opts?: { as?: string },
-): TempTableDef<TName, TCols> {
-  return { _tag: 'TempTable', name, columns, as: opts?.as }
+): TempTableDef<TName, TCols, undefined>
+// Overload 2: with alias → TAs = literal string (key in db context = alias)
+export function defineTempTable<TName extends string, TCols extends TempTableColumns, TAs extends string>(
+  name: TName,
+  columns: TCols,
+  opts: { as: TAs },
+): TempTableDef<TName, TCols, TAs>
+// Implementation
+export function defineTempTable<TName extends string, TCols extends TempTableColumns, TAs extends string | undefined = undefined>(
+  name: TName,
+  columns: TCols,
+  opts?: { as?: TAs },
+): TempTableDef<TName, TCols, TAs> {
+  return { _tag: 'TempTable', name, columns, as: (opts?.as ?? undefined) as TAs }
 }
 
 export function buildTempTableHelper<T extends TempTableDef>(def: T): TempTableHelper<T['columns']> {

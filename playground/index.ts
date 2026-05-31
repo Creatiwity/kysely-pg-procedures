@@ -12,13 +12,14 @@
 import { Pool } from 'pg'
 import {
   defineRowTrigger,
-  defineProcedure,
+  defineRowProcedure,
   defineTrigger,
   defineTempTable,
   compileAll,
   snapshotSetupSql,
   logSetupSql,
   sql,
+  ksql,  // Kysely's sql tag — use inside query builders (.where, .select, ...)
 } from '../src/index.js'
 
 // ─── Parse CLI args ────────────────────────────────────────────────────────────
@@ -31,24 +32,28 @@ const log = (logIdx !== -1 ? args[logIdx + 1] : 'none') as 'none' | 'info' | 'st
 const targetIdx = args.indexOf('--target')
 const logTarget = (targetIdx !== -1 ? args[targetIdx + 1] : 'table') as 'table' | 'notify'
 
-// ─── Define your procedures here ──────────────────────────────────────────────
+// ─── DB schema — one type, no duplication ────────────────────────────────────
 
-// Table schema — used to type NEW/OLD in row triggers
-interface PlaygroundItem {
-  id: string
-  label: string
-  score: number
-  audit_flag: boolean
+// Declare once; table names are type-checked at every defineRowTrigger call.
+type DB = {
+  playground_items: {
+    id: string
+    label: string
+    score: number
+    audit_flag: boolean
+  }
 }
 
-// Example 1 — BEFORE INSERT ROW trigger using defineRowTrigger<Schema>()
-// NEW.label and NEW.score are typed as ColumnRef (no `any`, full autocomplete)
-// OLD is not available (INSERT only → TypeScript error if you try to use it)
-const scoreTrigger = defineRowTrigger<PlaygroundItem>()(
+// ─── Define your procedures here ──────────────────────────────────────────────
+
+// Example 1 — BEFORE INSERT, inline (proc + trigger in one call).
+// 'playground_items' deduces the row type from DB — no <RowType> duplication.
+// OLD is unavailable (events: ['INSERT'] as const → TypeScript error if used).
+const scoreTrigger = defineRowTrigger<DB>()(
+  'playground_items',
   {
     name: 'playground_score_trigger',
     procedureName: 'playground_score_proc',
-    table: 'playground_items',
     timing: 'BEFORE',
     events: ['INSERT'] as const,
   },
@@ -60,7 +65,9 @@ const scoreTrigger = defineRowTrigger<PlaygroundItem>()(
   },
 )
 
-// Example 2 — AFTER UPDATE STATEMENT trigger with temp table
+// Example 2 — AFTER UPDATE STATEMENT trigger with temp table.
+// 2-step approach: defineRowProcedure (typed NEW/OLD) + defineTrigger separately.
+// Uses Kysely query builders in insertFrom and execute — no raw SQL blobs.
 const modifiedTable = defineTempTable(
   'PlaygroundModifiedItems',
   {
@@ -71,19 +78,28 @@ const modifiedTable = defineTempTable(
   { as: 'modified' },
 )
 
-const auditProc = defineProcedure(
+// defineRowProcedure: table name deduces row type, both NEW and OLD available.
+const auditProc = defineRowProcedure<DB>()(
+  'playground_items',
   { name: 'playground_audit_proc' },
   [modifiedTable],
   {},
-  ({ sql: s, db }) => {
+  ({ db }) => {
+    // insertFrom with Kysely query builder — no raw SQL
+    // insertFrom with Kysely query builder.
+    // Use ksql (Kysely's sql tag) for raw expressions inside query builders.
+    // Use our sql for statement fragments outside of query builders.
     db.modified.insertFrom(
       ['itemId', 'oldScore', 'newScore'],
-      sql`
-        SELECT ins."id", rem."score", ins."score"
-        FROM "inserted" AS ins
-        JOIN "removed" AS rem ON ins."id" = rem."id"
-        WHERE ins."score" IS DISTINCT FROM rem."score"
-      `,
+      db
+        .selectFrom('inserted as ins')
+        .innerJoin('removed as rem', join => join.onRef('ins.id', '=', 'rem.id'))
+        .where(ksql`ins."score" IS DISTINCT FROM rem."score"`)
+        .select([
+          ksql`ins."id"`.as('itemId'),
+          ksql`rem."score"`.as('oldScore'),
+          ksql`ins."score"`.as('newScore'),
+        ]),
     )
 
     db.if(db.modified.notExists(), () => {
@@ -93,6 +109,9 @@ const auditProc = defineProcedure(
 
     db.snapshot('after_collect')
 
+    // execute with our sql tag — db.modified.filter() returns our SqlFragment,
+    // not a Kysely expression, so it's used here in the statement form.
+    // (Using it in a Kysely .where() would require filter to return ksql.raw(...))
     db.execute(sql`
       UPDATE "playground_items" SET "audit_flag" = TRUE
       FROM "PlaygroundModifiedItems" AS m
@@ -104,6 +123,7 @@ const auditProc = defineProcedure(
   },
 )
 
+// defineTrigger receives the typed proc
 const auditTrigger = defineTrigger(
   {
     name: 'playground_audit_trigger',

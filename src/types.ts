@@ -27,11 +27,13 @@ export type TempTableColumns = Record<string, ColumnDef>
 export interface TempTableDef<
   TName extends string = string,
   TCols extends TempTableColumns = TempTableColumns,
+  TAs extends string | undefined = string | undefined,
 > {
   readonly _tag: 'TempTable'
   readonly name: TName
   readonly columns: TCols
-  readonly as?: string
+  /** Always set. undefined when no alias was provided, a string literal when { as: 'alias' } was passed. */
+  readonly as: TAs
 }
 
 export type RaiseLevel = 'DEBUG' | 'LOG' | 'INFO' | 'NOTICE' | 'WARNING' | 'EXCEPTION'
