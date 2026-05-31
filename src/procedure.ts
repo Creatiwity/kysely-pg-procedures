@@ -18,8 +18,7 @@ import type { TempTableAliasMap } from './tempTable.js'
 // Types
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type ProcedureCallback<TTables extends TempTableDef[] = any[]> = (ctx: {
+export type ProcedureCallback<TTables extends TempTableDef[] = []> = (ctx: {
   sql: typeof sql
   db: DbContext<TempTableAliasMap<TTables>>
 }) => void
@@ -52,7 +51,8 @@ export interface ProcedureDefinition {
   readonly security?: SecurityMode
   readonly tempTables: TempTableDef[]
   readonly vars: VarDecls
-  readonly body: ProcedureCallback
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly body: ProcedureCallback<any>   // erased: any bypasses contra-variance at storage site
 }
 
 export interface TriggerDefinition {
