@@ -19,14 +19,19 @@
     "kysely": "^0.28.5"
   },
   "peerDependencies": {
+    "@opentelemetry/api": ">=1.0.0",
     "pg": ">=8.0.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
     "pg": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.1",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
     "chokidar": "^4.0.0",

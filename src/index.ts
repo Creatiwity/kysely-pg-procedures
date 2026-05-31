@@ -21,6 +21,11 @@ export { logSetupSql } from './log-setup.js'
 export { createProcLogListener } from './notify-listener.js'
 export type { ProcLogEntry, ProcLogStep } from './notify-listener.js'
 
+// Optional OpenTelemetry integration — requires @opentelemetry/api
+// npm install @opentelemetry/api
+export { createOtelProcSpanEmitter } from './otel.js'
+export type { OtelProcSpanEmitterOpts } from './otel.js'
+
 export { compileDb, toSqlFragment, extractFromClause, isCompilable } from './kysely-compile.js'
 export type { Compilable } from './kysely-compile.js'
 
