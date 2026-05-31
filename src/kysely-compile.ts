@@ -4,7 +4,9 @@ import {
   PostgresAdapter,
   PostgresIntrospector,
   PostgresQueryCompiler,
+  createQueryId,
 } from 'kysely'
+import type { RootOperationNode } from 'kysely'
 import type { SqlFragment } from './types.js'
 
 /**
@@ -100,4 +102,16 @@ export function extractFromClause(query: Compilable): SqlFragment {
   }
 
   return { _tag: 'sql', text: match[1].trim() }
+}
+
+/**
+ * Compile a Kysely RootOperationNode to SQL using PostgresQueryCompiler.
+ * Used by KyselyOtelPlugin to get the SQL statement for span attributes.
+ * PostgresQueryCompiler is not in Kysely's public type exports so we expose
+ * it via this helper rather than importing it directly in otel.ts.
+ */
+export function compileNode(node: RootOperationNode): { sql: string; parameters: readonly unknown[] } {
+  // createQueryId() generates a fresh UUID — required by compileQuery signature
+  // but only used for query correlation, not for the SQL output itself
+  return new PostgresQueryCompiler().compileQuery(node, createQueryId())
 }
