@@ -1,4 +1,7 @@
-import type { ColumnType, SqlFragment } from './types.js'
+import { sql as ksql, expressionBuilder } from 'kysely'
+import type { ExpressionBuilder, Expression, SqlBool, RawBuilder } from 'kysely'
+import type { ColumnType } from './types.js'
+import { compileDb } from './kysely-compile.js'
 
 // ---------------------------------------------------------------------------
 // Session variable definitions
@@ -15,10 +18,16 @@ export interface SessionVarsDef<TVars extends SessionVarDefs = SessionVarDefs> {
 
 /**
  * Declare session variables used inside RLS policies.
- * Each variable is referenced as `current_setting('app.<name>', true)::<pgtype>` in compiled SQL.
+ *
+ * Each variable is set by your middleware via `SET LOCAL app.<name> = $1`
+ * and referenced in policy clauses as `current_setting('app.<name>', true)::<pgtype>`.
  *
  * ```ts
- * const sessionVars = defineSessionVars({ userId: 'uuid', orgId: 'uuid' })
+ * const session = defineSessionVars({
+ *   orgId:  'uuid',
+ *   userId: 'uuid',
+ *   role:   'text',
+ * })
  * ```
  */
 export function defineSessionVars<TVars extends SessionVarDefs>(vars: TVars): SessionVarsDef<TVars> {
@@ -30,6 +39,7 @@ export function defineSessionVars<TVars extends SessionVarDefs>(vars: TVars): Se
 // ---------------------------------------------------------------------------
 
 export interface RlsEnableOpts {
+  /** Also emit FORCE ROW LEVEL SECURITY (bypasses table-owner exemption). Default: false. */
   force?: boolean
 }
 
@@ -40,33 +50,30 @@ export interface RlsEnableDef {
 }
 
 /**
- * Enable Row Level Security on a table (and optionally FORCE it for table owners too).
+ * Enable Row Level Security on a table.
  *
  * ```ts
  * const rlsItems = enableRls<DB>()('items', { force: true })
  * ```
+ *
+ * Compiles to:
+ * ```sql
+ * ALTER TABLE "items" ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE "items" FORCE ROW LEVEL SECURITY;   -- only when force: true
+ * ```
  */
-export function enableRls<_TSchema extends Record<string, unknown>>() {
-  return function <TTable extends string>(
+export function enableRls<TSchema extends Record<string, Record<string, unknown>>>() {
+  return function <TTable extends keyof TSchema & string>(
     table: TTable,
     opts?: RlsEnableOpts,
   ): RlsEnableDef {
-    return {
-      _tag: 'RlsEnable',
-      table,
-      force: opts?.force ?? false,
-    }
+    return { _tag: 'RlsEnable', table, force: opts?.force ?? false }
   }
 }
 
-/**
- * Compile an RlsEnableDef to SQL.
- */
 export function compileRlsEnable(def: RlsEnableDef): string {
   const lines = [`ALTER TABLE "${def.table}" ENABLE ROW LEVEL SECURITY;`]
-  if (def.force) {
-    lines.push(`ALTER TABLE "${def.table}" FORCE ROW LEVEL SECURITY;`)
-  }
+  if (def.force) lines.push(`ALTER TABLE "${def.table}" FORCE ROW LEVEL SECURITY;`)
   return lines.join('\n')
 }
 
@@ -78,173 +85,183 @@ export type PolicyCommand = 'ALL' | 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE'
 export type PolicyPermissiveness = 'PERMISSIVE' | 'RESTRICTIVE'
 
 export interface PolicyOpts {
+  /** Policy name — must be unique per table */
   name: string
+  /** PERMISSIVE (default) or RESTRICTIVE */
   as?: PolicyPermissiveness
+  /** Which DML command this policy applies to. Default: ALL */
   command?: PolicyCommand
+  /** PostgreSQL role names this policy applies to. Default: PUBLIC */
   roles?: string[]
 }
 
 /**
- * A column reference proxy for use inside policy bodies.
- * col.columnName → `"columnName"` in compiled SQL.
+ * A session variable proxy for use inside policy bodies.
+ * `session.varName` → `current_setting('app.varName', true)::<pgtype>`
+ * typed as `RawBuilder<any>` so it is assignable to any column type
+ * in `eb('col', '=', session.varName)` comparisons.
  */
-export type ColProxy<TRow> = {
-  readonly [K in keyof TRow & string]: SqlFragment
+export type SessionProxy<TVars extends SessionVarDefs> = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly [K in keyof TVars & string]: RawBuilder<any>
 }
 
 /**
- * A session variable proxy for use inside policy bodies.
- * session.varName → `current_setting('app.varName', true)::<pgtype>` in compiled SQL.
+ * The context passed to a policy body function.
+ *
+ * - `eb` — Kysely `ExpressionBuilder` typed to the table's columns.
+ *   Column names are type-checked against the DB schema.
+ * - `session` — typed session variable proxy; each property is a
+ *   `RawBuilder` that compiles to `current_setting('app.xxx', true)::type`.
  */
-export type SessionProxy<TVars extends SessionVarDefs> = {
-  readonly [K in keyof TVars & string]: SqlFragment
-}
-
-export interface PolicyBody<TRow, TVars extends SessionVarDefs> {
-  using?: (ctx: PolicyBodyCtx<TRow, TVars>) => SqlFragment
-  withCheck?: (ctx: PolicyBodyCtx<TRow, TVars>) => SqlFragment
-}
-
-export interface PolicyBodyCtx<TRow, TVars extends SessionVarDefs> {
-  col: ColProxy<TRow>
+export interface PolicyBodyCtx<
+  TSchema extends Record<string, Record<string, unknown>>,
+  TTable extends keyof TSchema & string,
+  TVars extends SessionVarDefs,
+> {
+  eb: ExpressionBuilder<TSchema, TTable>
   session: SessionProxy<TVars>
-  sql: {
-    raw(text: string): SqlFragment
-  }
 }
 
 export interface PolicyDef {
   readonly _tag: 'Policy'
   readonly table: string
   readonly opts: PolicyOpts
-  readonly using?: SqlFragment
-  readonly withCheck?: SqlFragment
+  readonly using?: string      // compiled SQL for USING clause
+  readonly withCheck?: string  // compiled SQL for WITH CHECK clause
 }
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
 function pgTypeStr(type: ColumnType): string {
-  const map: Record<ColumnType, string> = {
-    uuid: 'uuid',
-    text: 'text',
-    varchar: 'varchar',
-    integer: 'integer',
-    bigint: 'bigint',
-    smallint: 'smallint',
-    numeric: 'numeric',
-    decimal: 'decimal',
-    real: 'real',
-    float: 'float',
-    boolean: 'boolean',
-    timestamptz: 'timestamptz',
-    timestamp: 'timestamp',
-    date: 'date',
-    time: 'time',
-    jsonb: 'jsonb',
-    json: 'json',
-    bytea: 'bytea',
-  }
-  return map[type] ?? type
-}
-
-function makeColProxy<TRow>(): ColProxy<TRow> {
-  return new Proxy({} as ColProxy<TRow>, {
-    get(_target, prop: string | symbol): SqlFragment | undefined {
-      if (typeof prop !== 'string') return undefined
-      return { _tag: 'sql', text: `"${prop}"` }
-    },
-  })
+  return type  // ColumnType values are already valid PostgreSQL type names
 }
 
 function makeSessionProxy<TVars extends SessionVarDefs>(vars: TVars): SessionProxy<TVars> {
   return new Proxy({} as SessionProxy<TVars>, {
-    get(_target, prop: string | symbol): SqlFragment | undefined {
+    get(_target, prop: string | symbol): RawBuilder<any> | undefined { // eslint-disable-line @typescript-eslint/no-explicit-any
       if (typeof prop !== 'string') return undefined
       const type = vars[prop]
       if (!type) return undefined
-      return { _tag: 'sql', text: `current_setting('app.${prop}', true)::${pgTypeStr(type)}` }
+      // Cast to RawBuilder<any> so session.xxx is assignable to any column type in eb()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return ksql.raw(`current_setting('app.${prop}', true)::${pgTypeStr(type)}`) as RawBuilder<any>
     },
   })
 }
 
 /**
- * Define an RLS policy for a table.
+ * Compile a Kysely Expression<SqlBool> to the raw SQL string suitable for
+ * embedding in a USING or WITH CHECK clause.
  *
- * Uses DROP IF EXISTS + CREATE (no CREATE OR REPLACE, which requires PG17).
+ * Strategy: build a dummy SELECT WHERE query and extract the WHERE clause.
+ * The sentinel table name `__rls__` makes the extraction unambiguous.
+ */
+function compileExpression(expr: Expression<SqlBool>): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { sql: raw } = compileDb
+    .selectFrom('__rls__' as any)
+    .select(ksql`1`.as('x') as any)
+    .where(expr as any)
+    .compile()
+
+  const marker = 'from "__rls__" where '
+  const idx = raw.indexOf(marker)
+  return idx >= 0 ? raw.slice(idx + marker.length) : 'true'
+}
+
+// ---------------------------------------------------------------------------
+// definePolicy
+// ---------------------------------------------------------------------------
+
+/**
+ * Define a PostgreSQL Row Level Security policy.
+ *
+ * The body function receives a fully typed Kysely `ExpressionBuilder` (`eb`)
+ * and a `session` proxy. Use `eb` for all conditions — it provides column
+ * type-checking from your DB schema. Use `session.*` as values in comparisons.
+ * Fall back to `eb.raw(...)` or `ksql`...`` only when necessary.
  *
  * ```ts
+ * const session = defineSessionVars({ orgId: 'uuid', userId: 'uuid' })
+ *
  * const policy = definePolicy<DB>()(
  *   'items',
  *   { name: 'items_tenant_isolation', as: 'PERMISSIVE', command: 'ALL', roles: ['app_user'] },
- *   sessionVars,
- *   {
- *     using: ({ col, session }) =>
- *       sql.raw(`${col.org_id.text} = ${session.orgId.text}`),
- *   },
+ *   session,
+ *   ({ eb, session: s }) => ({
+ *     using:     eb('org_id', '=', s.orgId),
+ *     withCheck: eb('org_id', '=', s.orgId),
+ *   }),
  * )
+ *
+ * // Multi-condition:
+ * ({ eb, session: s }) => ({
+ *   using: eb.and([
+ *     eb('org_id', '=', s.orgId),
+ *     eb('deleted_at', 'is', null),
+ *   ]),
+ * })
+ *
+ * // Escape hatch:
+ * ({ eb, session: s }) => ({
+ *   using: eb.ref('org_id').$castTo<string>().is(s.orgId),
+ * })
  * ```
+ *
+ * Uses DROP IF EXISTS + CREATE (no CREATE OR REPLACE, which requires PG 17).
  */
-export function definePolicy<_TSchema extends Record<string, unknown>>() {
+export function definePolicy<TSchema extends Record<string, Record<string, unknown>>>() {
   return function <
-    TTable extends string,
+    TTable extends keyof TSchema & string,
     TVars extends SessionVarDefs = Record<string, never>,
   >(
     table: TTable,
     opts: PolicyOpts,
     sessionVarsDef: SessionVarsDef<TVars> | null,
-    body: PolicyBody<_TSchema extends Record<TTable, infer TRow> ? TRow : Record<string, unknown>, TVars>,
+    body: (ctx: PolicyBodyCtx<TSchema, TTable, TVars>) => {
+      using?: Expression<SqlBool>
+      withCheck?: Expression<SqlBool>
+    },
   ): PolicyDef {
-    const colProxy = makeColProxy<_TSchema extends Record<TTable, infer TRow> ? TRow : Record<string, unknown>>()
-    const sessionProxy = makeSessionProxy<TVars>(
-      (sessionVarsDef?.vars ?? {}) as TVars,
-    )
-    const sqlHelper = { raw: (text: string): SqlFragment => ({ _tag: 'sql', text }) }
+    const eb = expressionBuilder<TSchema, TTable>()
+    const session = makeSessionProxy<TVars>((sessionVarsDef?.vars ?? {}) as TVars)
 
-    const ctx = { col: colProxy, session: sessionProxy, sql: sqlHelper }
-
-    const using = body.using?.(ctx)
-    const withCheck = body.withCheck?.(ctx)
+    const { using, withCheck } = body({ eb, session })
 
     return {
       _tag: 'Policy',
       table,
       opts,
-      using,
-      withCheck,
+      using:     using     ? compileExpression(using)     : undefined,
+      withCheck: withCheck ? compileExpression(withCheck) : undefined,
     }
   }
 }
 
+// ---------------------------------------------------------------------------
+// compilePolicyBlock
+// ---------------------------------------------------------------------------
+
 /**
  * Compile a PolicyDef to SQL.
- * Emits DROP POLICY IF EXISTS followed by CREATE POLICY (no CREATE OR REPLACE for pre-PG17 compat).
+ * Emits DROP POLICY IF EXISTS + CREATE POLICY (pre-PG17 compatibility).
  */
 export function compilePolicyBlock(def: PolicyDef): string {
-  const lines: string[] = []
+  const lines: string[] = [
+    `DROP POLICY IF EXISTS "${def.opts.name}" ON "${def.table}";`,
+  ]
 
-  // Drop first (pre-PG17 compatibility — no CREATE OR REPLACE POLICY)
-  lines.push(`DROP POLICY IF EXISTS "${def.opts.name}" ON "${def.table}";`)
-
-  // CREATE POLICY header
   let header = `CREATE POLICY "${def.opts.name}" ON "${def.table}"`
-
-  if (def.opts.as) {
-    header += ` AS ${def.opts.as}`
-  }
-  if (def.opts.command) {
-    header += ` FOR ${def.opts.command}`
-  }
-  if (def.opts.roles && def.opts.roles.length > 0) {
-    header += ` TO ${def.opts.roles.join(', ')}`
-  }
-
+  if (def.opts.as)                       header += ` AS ${def.opts.as}`
+  if (def.opts.command)                  header += ` FOR ${def.opts.command}`
+  if (def.opts.roles?.length)            header += ` TO ${def.opts.roles.join(', ')}`
   lines.push(header)
 
-  if (def.using) {
-    lines.push(`    USING (${def.using.text})`)
-  }
-  if (def.withCheck) {
-    lines.push(`    WITH CHECK (${def.withCheck.text})`)
-  }
-
+  if (def.using)     lines.push(`    USING (${def.using})`)
+  if (def.withCheck) lines.push(`    WITH CHECK (${def.withCheck})`)
   lines.push(';')
 
   return lines.join('\n')

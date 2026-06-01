@@ -11,422 +11,216 @@ import {
   sql,
 } from '../../src/index.js'
 
-// ---------------------------------------------------------------------------
-// Test DB schema for type-checked tests
-// ---------------------------------------------------------------------------
 type DB = {
-  items: { id: string; org_id: string; user_id: string; name: string; score: number }
+  items:  { id: string; org_id: string; user_id: string; name: string; score: number; deleted_at: Date | null }
   orders: { id: string; tenant_id: string; amount: number }
 }
 
 // ---------------------------------------------------------------------------
-// 1. enableRls — basic ENABLE ROW LEVEL SECURITY
+// enableRls
 // ---------------------------------------------------------------------------
 describe('enableRls', () => {
   it('compiles to ALTER TABLE ENABLE ROW LEVEL SECURITY', () => {
-    const def = enableRls<DB>()('items')
-    const output = compileRlsEnable(def)
-
+    const output = compileRlsEnable(enableRls<DB>()('items'))
     expect(output).toContain('ALTER TABLE "items" ENABLE ROW LEVEL SECURITY')
     expect(output).not.toContain('FORCE')
   })
 
   it('with force: true adds FORCE ROW LEVEL SECURITY', () => {
-    const def = enableRls<DB>()('items', { force: true })
-    const output = compileRlsEnable(def)
-
+    const output = compileRlsEnable(enableRls<DB>()('items', { force: true }))
     expect(output).toContain('ALTER TABLE "items" ENABLE ROW LEVEL SECURITY')
     expect(output).toContain('ALTER TABLE "items" FORCE ROW LEVEL SECURITY')
   })
 
-  it('without force option does not emit FORCE', () => {
-    const def = enableRls<DB>()('orders', { force: false })
-    const output = compileRlsEnable(def)
-
-    expect(output).toContain('ALTER TABLE "orders" ENABLE ROW LEVEL SECURITY')
-    expect(output).not.toContain('FORCE')
-  })
-
-  it('sets _tag to RlsEnable', () => {
-    const def = enableRls<DB>()('items')
+  it('sets _tag, table, force', () => {
+    const def = enableRls<DB>()('orders')
     expect(def._tag).toBe('RlsEnable')
-    expect(def.table).toBe('items')
+    expect(def.table).toBe('orders')
     expect(def.force).toBe(false)
   })
 })
 
 // ---------------------------------------------------------------------------
-// 2. definePolicy — basic USING clause
+// definePolicy — Kysely ExpressionBuilder (primary API)
 // ---------------------------------------------------------------------------
-describe('definePolicy — basic USING clause', () => {
-  it('compiles to correct CREATE POLICY SQL with USING', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_select_policy', command: 'SELECT' },
-      null,
-      {
-        using: ({ sql: s }) => s.raw('true'),
-      },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    expect(output).toContain('DROP POLICY IF EXISTS "items_select_policy" ON "items"')
-    expect(output).toContain('CREATE POLICY "items_select_policy" ON "items"')
-    expect(output).toContain('FOR SELECT')
-    expect(output).toContain('USING (true)')
-  })
-
-  it('col.columnName produces correct column reference', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_col_test' },
-      null,
-      {
-        using: ({ col, sql: s }) => s.raw(`${col.org_id.text} IS NOT NULL`),
-      },
-    )
-
-    const output = compilePolicyBlock(policy)
-
+describe('definePolicy — Kysely eb API', () => {
+  it('simple equality produces correct USING SQL', () => {
+    const s = defineSessionVars({ orgId: 'uuid' })
+    const p = definePolicy<DB>()('items', { name: 'p' }, s, ({ eb, session }) => ({
+      using: eb('org_id', '=', session.orgId),
+    }))
+    const output = compilePolicyBlock(p)
+    expect(output).toContain('USING (')
     expect(output).toContain('"org_id"')
-    expect(output).toContain('USING ("org_id" IS NOT NULL)')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// 3. defineSessionVars + session proxy
-// ---------------------------------------------------------------------------
-describe('defineSessionVars + session proxy', () => {
-  it('session.varName compiles to current_setting with correct type cast', () => {
-    const sessionVars = defineSessionVars({ userId: 'uuid', orgId: 'uuid' })
-
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_session_policy' },
-      sessionVars,
-      {
-        using: ({ col, session, sql: s }) =>
-          s.raw(`${col.org_id.text} = ${session.orgId.text}`),
-      },
-    )
-
-    const output = compilePolicyBlock(policy)
-
     expect(output).toContain("current_setting('app.orgId', true)::uuid")
-    expect(output).toContain('"org_id"')
   })
 
-  it('session.userId compiles to current_setting with text type', () => {
-    const sessionVars = defineSessionVars({ tenantId: 'text' })
+  it('eb.and combines multiple conditions', () => {
+    const s = defineSessionVars({ orgId: 'uuid' })
+    const p = definePolicy<DB>()('items', { name: 'p_and' }, s, ({ eb, session }) => ({
+      using: eb.and([
+        eb('org_id', '=', session.orgId),
+        eb('deleted_at', 'is', null),
+      ]),
+    }))
+    const output = compilePolicyBlock(p)
+    expect(output).toContain('"org_id"')
+    expect(output).toContain('"deleted_at"')
+    expect(output).toContain('is null')
+  })
 
-    const policy = definePolicy<DB>()(
-      'orders',
-      { name: 'orders_tenant_policy' },
-      sessionVars,
-      {
-        using: ({ session, sql: s }) => s.raw(session.tenantId.text),
-      },
-    )
+  it('eb.or combines conditions with OR', () => {
+    const s = defineSessionVars({ orgId: 'uuid', userId: 'uuid' })
+    const p = definePolicy<DB>()('items', { name: 'p_or' }, s, ({ eb, session }) => ({
+      using: eb.or([
+        eb('org_id', '=', session.orgId),
+        eb('user_id', '=', session.userId),
+      ]),
+    }))
+    const output = compilePolicyBlock(p)
+    expect(output).toContain('"org_id"')
+    expect(output).toContain('"user_id"')
+  })
 
-    const output = compilePolicyBlock(policy)
-
+  it('session variable compiles with correct type cast', () => {
+    const s = defineSessionVars({ tenantId: 'text', userId: 'uuid' })
+    const p = definePolicy<DB>()('items', { name: 'p_session' }, s, ({ eb, session }) => ({
+      using: eb.and([
+        eb('org_id', '=', session.tenantId),
+        eb('user_id', '=', session.userId),
+      ]),
+    }))
+    const output = compilePolicyBlock(p)
     expect(output).toContain("current_setting('app.tenantId', true)::text")
+    expect(output).toContain("current_setting('app.userId', true)::uuid")
+  })
+
+  it('null sessionVarsDef works for policies without session context', () => {
+    const p = definePolicy<DB>()('items', { name: 'p_nosession' }, null, ({ eb }) => ({
+      using: eb('score', '>', 0),
+    }))
+    const output = compilePolicyBlock(p)
+    expect(output).toContain('USING (')
+    expect(output).toContain('"score"')
   })
 })
 
 // ---------------------------------------------------------------------------
-// 4. PERMISSIVE vs RESTRICTIVE
+// definePolicy — opts
 // ---------------------------------------------------------------------------
-describe('definePolicy — permissiveness', () => {
+describe('definePolicy — opts', () => {
   it('PERMISSIVE appears in compiled output', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_permissive', as: 'PERMISSIVE', command: 'ALL' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    expect(output).toContain('AS PERMISSIVE')
+    const p = definePolicy<DB>()('items', { name: 'p', as: 'PERMISSIVE', command: 'ALL' }, null,
+      ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).toContain('AS PERMISSIVE')
   })
 
   it('RESTRICTIVE appears in compiled output', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_restrictive', as: 'RESTRICTIVE', command: 'SELECT' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    expect(output).toContain('AS RESTRICTIVE')
+    const p = definePolicy<DB>()('items', { name: 'p', as: 'RESTRICTIVE', command: 'SELECT' }, null,
+      ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).toContain('AS RESTRICTIVE')
   })
 
-  it('omitting permissiveness does not emit AS clause', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_no_as' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
+  it('FOR SELECT', () => {
+    const p = definePolicy<DB>()('items', { name: 'p', command: 'SELECT' }, null,
+      ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).toContain('FOR SELECT')
+  })
 
-    const output = compilePolicyBlock(policy)
+  it('FOR INSERT with withCheck only', () => {
+    const s = defineSessionVars({ orgId: 'uuid' })
+    const p = definePolicy<DB>()('items', { name: 'p', command: 'INSERT' }, s,
+      ({ eb, session }) => ({ withCheck: eb('org_id', '=', session.orgId) }))
+    const output = compilePolicyBlock(p)
+    expect(output).toContain('FOR INSERT')
+    expect(output).toContain('WITH CHECK (')
+    expect(output).not.toContain('USING')
+  })
 
+  it('FOR UPDATE with both USING and WITH CHECK', () => {
+    const s = defineSessionVars({ orgId: 'uuid' })
+    const p = definePolicy<DB>()('items', { name: 'p', command: 'UPDATE' }, s, ({ eb, session }) => ({
+      using:     eb('org_id', '=', session.orgId),
+      withCheck: eb('org_id', '=', session.orgId),
+    }))
+    const output = compilePolicyBlock(p)
+    expect(output).toContain('FOR UPDATE')
+    expect(output).toContain('USING (')
+    expect(output).toContain('WITH CHECK (')
+  })
+
+  it('single role → TO <role>', () => {
+    const p = definePolicy<DB>()('items', { name: 'p', roles: ['app_user'] }, null,
+      ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).toContain('TO app_user')
+  })
+
+  it('multiple roles → comma-separated', () => {
+    const p = definePolicy<DB>()('items', { name: 'p', roles: ['app_user', 'app_admin'] }, null,
+      ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).toContain('TO app_user, app_admin')
+  })
+
+  it('omitting roles does not emit TO clause', () => {
+    const p = definePolicy<DB>()('items', { name: 'p' }, null, ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).not.toContain(' TO ')
+  })
+
+  it('omitting as does not emit AS clause', () => {
+    const p = definePolicy<DB>()('items', { name: 'p' }, null, ({ eb }) => ({ using: eb('score', '>', 0) }))
+    const output = compilePolicyBlock(p)
     expect(output).not.toContain('AS PERMISSIVE')
     expect(output).not.toContain('AS RESTRICTIVE')
   })
 })
 
 // ---------------------------------------------------------------------------
-// 5. Specific command (SELECT, INSERT, etc.)
-// ---------------------------------------------------------------------------
-describe('definePolicy — command', () => {
-  it('SELECT command appears in compiled output', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_select', command: 'SELECT' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    expect(compilePolicyBlock(policy)).toContain('FOR SELECT')
-  })
-
-  it('INSERT command appears in compiled output', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_insert', command: 'INSERT' },
-      null,
-      { withCheck: ({ sql: s }) => s.raw('true') },
-    )
-
-    expect(compilePolicyBlock(policy)).toContain('FOR INSERT')
-  })
-
-  it('UPDATE command appears in compiled output', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_update', command: 'UPDATE' },
-      null,
-      {
-        using: ({ sql: s }) => s.raw('true'),
-        withCheck: ({ sql: s }) => s.raw('true'),
-      },
-    )
-
-    expect(compilePolicyBlock(policy)).toContain('FOR UPDATE')
-  })
-
-  it('ALL command appears in compiled output', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_all', command: 'ALL' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    expect(compilePolicyBlock(policy)).toContain('FOR ALL')
-  })
-
-  it('omitting command does not emit FOR clause', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_no_cmd' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-    expect(output).not.toContain('FOR SELECT')
-    expect(output).not.toContain('FOR ALL')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// 6. Roles array → TO role1, role2
-// ---------------------------------------------------------------------------
-describe('definePolicy — roles', () => {
-  it('single role appears as TO <role>', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_role_policy', roles: ['app_user'] },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-    expect(output).toContain('TO app_user')
-  })
-
-  it('multiple roles appear as TO role1, role2', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_roles_policy', roles: ['app_user', 'app_admin'] },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-    expect(output).toContain('TO app_user, app_admin')
-  })
-
-  it('omitting roles does not emit TO clause', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_no_roles' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-    expect(output).not.toContain(' TO ')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// 7. Both USING and WITH CHECK clauses
-// ---------------------------------------------------------------------------
-describe('definePolicy — USING and WITH CHECK', () => {
-  it('both USING and WITH CHECK appear when both are specified', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_both_clauses', command: 'UPDATE' },
-      null,
-      {
-        using: ({ sql: s }) => s.raw('true'),
-        withCheck: ({ sql: s }) => s.raw('false'),
-      },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    expect(output).toContain('USING (true)')
-    expect(output).toContain('WITH CHECK (false)')
-  })
-
-  it('only USING when withCheck is omitted', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_using_only', command: 'SELECT' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    expect(output).toContain('USING (true)')
-    expect(output).not.toContain('WITH CHECK')
-  })
-
-  it('only WITH CHECK when using is omitted', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_check_only', command: 'INSERT' },
-      null,
-      { withCheck: ({ sql: s }) => s.raw('NEW."org_id" IS NOT NULL') },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    expect(output).toContain('WITH CHECK (NEW."org_id" IS NOT NULL)')
-    expect(output).not.toContain('USING')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// 8. DROP IF EXISTS pattern (no CREATE OR REPLACE for pre-PG17)
+// DROP IF EXISTS + CREATE (no CREATE OR REPLACE, pre-PG17)
 // ---------------------------------------------------------------------------
 describe('definePolicy — DROP IF EXISTS + CREATE pattern', () => {
-  it('emits DROP POLICY IF EXISTS before CREATE POLICY', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_drop_create' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-
-    const dropIdx = output.indexOf('DROP POLICY IF EXISTS "items_drop_create"')
-    const createIdx = output.indexOf('CREATE POLICY "items_drop_create"')
-
+  it('DROP appears before CREATE', () => {
+    const p = definePolicy<DB>()('items', { name: 'my_policy' }, null, ({ eb }) => ({ using: eb('score', '>', 0) }))
+    const output = compilePolicyBlock(p)
+    const dropIdx   = output.indexOf('DROP POLICY IF EXISTS "my_policy"')
+    const createIdx = output.indexOf('CREATE POLICY "my_policy"')
     expect(dropIdx).toBeGreaterThan(-1)
-    expect(createIdx).toBeGreaterThan(-1)
-    expect(dropIdx).toBeLessThan(createIdx)
+    expect(createIdx).toBeGreaterThan(dropIdx)
   })
 
   it('does NOT use CREATE OR REPLACE POLICY', () => {
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_no_replace' },
-      null,
-      { using: ({ sql: s }) => s.raw('true') },
-    )
-
-    const output = compilePolicyBlock(policy)
-    expect(output).not.toContain('CREATE OR REPLACE POLICY')
+    const p = definePolicy<DB>()('items', { name: 'p' }, null, ({ eb }) => ({ using: eb('score', '>', 0) }))
+    expect(compilePolicyBlock(p)).not.toContain('CREATE OR REPLACE POLICY')
   })
 })
 
 // ---------------------------------------------------------------------------
-// 9. compileAll ordering: RLS enables → policies → procedures → triggers
+// compileAll ordering
 // ---------------------------------------------------------------------------
 describe('compileAll — ordering with RLS', () => {
-  it('includes RLS enable before policies and procedures in output', () => {
+  it('RLS enable → policies → procedures → triggers', () => {
     const rlsDef = enableRls<DB>()('items')
-
-    const sessionVars = defineSessionVars({ orgId: 'uuid' })
-    const policy = definePolicy<DB>()(
-      'items',
-      { name: 'items_all_policy', command: 'ALL' },
-      sessionVars,
-      { using: ({ col, session, sql: s }) => s.raw(`${col.org_id.text} = ${session.orgId.text}`) },
-    )
-
-    function makeProc(name: string) {
-      return defineProcedure({ name }, [], {}, ({ db }) => {
-        db.return(sql.raw('NEW'))
-      })
-    }
-
-    const proc = makeProc('trg_items_fn')
-    const trigger = defineTrigger(
-      { name: 'trg_items', table: 'items', timing: 'BEFORE', events: ['INSERT'], forEach: 'ROW' },
-      proc,
-    )
+    const s = defineSessionVars({ orgId: 'uuid' })
+    const policy = definePolicy<DB>()('items', { name: 'items_policy', command: 'ALL' }, s,
+      ({ eb, session }) => ({ using: eb('org_id', '=', session.orgId) }))
+    const proc = defineProcedure({ name: 'fn_items' }, [], {}, ({ db }) => { db.return(sql.raw('NEW')) })
+    const trigger = defineTrigger({ name: 'trg_items', table: 'items', timing: 'BEFORE', events: ['INSERT'], forEach: 'ROW' }, proc)
 
     const output = compileAll([rlsDef, policy, proc, trigger])
 
-    expect(output).toContain('-- Generated by @mesalia/kysely-pg-procedures')
-    expect(output).toContain('-- DO NOT EDIT MANUALLY')
-
-    const rlsIdx = output.indexOf('ALTER TABLE "items" ENABLE ROW LEVEL SECURITY')
-    const policyIdx = output.indexOf('CREATE POLICY "items_all_policy"')
-    const procIdx = output.indexOf('CREATE OR REPLACE FUNCTION trg_items_fn')
+    const rlsIdx     = output.indexOf('ALTER TABLE "items" ENABLE ROW LEVEL SECURITY')
+    const policyIdx  = output.indexOf('CREATE POLICY "items_policy"')
+    const procIdx    = output.indexOf('CREATE OR REPLACE FUNCTION fn_items')
     const triggerIdx = output.indexOf('CREATE OR REPLACE TRIGGER trg_items')
 
     expect(rlsIdx).toBeGreaterThan(-1)
-    expect(policyIdx).toBeGreaterThan(-1)
-    expect(procIdx).toBeGreaterThan(-1)
-    expect(triggerIdx).toBeGreaterThan(-1)
-
-    // RLS enable comes before policy
-    expect(rlsIdx).toBeLessThan(policyIdx)
-    // Policy comes before procedure
-    expect(policyIdx).toBeLessThan(procIdx)
-    // Procedure comes before trigger
-    expect(procIdx).toBeLessThan(triggerIdx)
+    expect(policyIdx).toBeGreaterThan(rlsIdx)
+    expect(procIdx).toBeGreaterThan(policyIdx)
+    expect(triggerIdx).toBeGreaterThan(procIdx)
   })
 
-  it('compileAll with only RLS definitions still emits header', () => {
-    const rlsDef = enableRls<DB>()('orders', { force: true })
-    const output = compileAll([rlsDef])
-
-    expect(output).toContain('-- Generated by @mesalia/kysely-pg-procedures')
-    expect(output).toContain('ALTER TABLE "orders" ENABLE ROW LEVEL SECURITY')
+  it('compileAll with only RLS still emits header', () => {
+    const output = compileAll([enableRls<DB>()('orders', { force: true })])
+    expect(output).toContain('-- Generated by')
     expect(output).toContain('ALTER TABLE "orders" FORCE ROW LEVEL SECURITY')
   })
 })

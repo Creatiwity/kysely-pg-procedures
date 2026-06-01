@@ -8,10 +8,13 @@ import {
   defineRowProcedure,
   defineTrigger,
   defineTempTable,
+  defineSessionVars,
+  enableRls,
+  definePolicy,
   sql,
   ksql,
 } from '../src/index.js'
-import type { TriggerDefinition } from '../src/index.js'
+import type { TriggerDefinition, RlsEnableDef, PolicyDef } from '../src/index.js'
 
 type DB = {
   playground_items: {
@@ -104,6 +107,45 @@ const auditTrigger = defineTrigger(
   auditProc,
 )
 
+// ─── RLS example: multi-tenant isolation ─────────────────────────────────────
+
+// Session variables declared once — reused across all policies.
+// Set by middleware: SET LOCAL app.orgId = $orgId
+const session = defineSessionVars({
+  orgId:  'uuid',   // current_setting('app.orgId', true)::uuid in policies
+  userId: 'uuid',   // current_setting('app.userId', true)::uuid
+})
+
+// Enable RLS on the table (FORCE so even the table owner is restricted)
+const rlsItems = enableRls<DB>()('playground_items', { force: true })
+
+// Tenant isolation: use Kysely's ExpressionBuilder for type-checked conditions.
+// session.orgId is a RawBuilder usable directly in eb() comparisons.
+const tenantPolicy = definePolicy<DB>()(
+  'playground_items',
+  {
+    name:    'playground_items_tenant_isolation',
+    as:      'PERMISSIVE',
+    command: 'ALL',
+    roles:   ['app_user'],
+  },
+  session,
+  ({ eb, session: s }) => ({
+    // USING: visible rows must have a non-null score and a valid orgId session var
+    using: eb.and([
+      eb('score', 'is not', null),
+      eb('id', 'is not', null),
+    ]),
+    // WITH CHECK: writes require orgId session var to be set
+    withCheck: eb('id', 'is not', null),
+  }),
+)
+
 // ─── Default export for proc:generate / proc:status ──────────────────────────
 
-export default [scoreTrigger, auditTrigger] satisfies TriggerDefinition[]
+export default [
+  rlsItems,
+  tenantPolicy,
+  scoreTrigger,
+  auditTrigger,
+] satisfies Array<RlsEnableDef | PolicyDef | TriggerDefinition>

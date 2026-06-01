@@ -1,5 +1,5 @@
 {
-  "rebuiltAt": "2026-05-31T22:41:52.497Z",
+  "rebuiltAt": "2026-06-01T08:05:51.849Z",
   "rebuiltFrom": "migration-files",
   "entries": {
     "playground_audit_proc": {
@@ -28,6 +28,20 @@
       "hash": "sha256:69248d9c18f70d82bf24c3fe6408a80ed6b16b7a800c2c9af6ba3fe7ef0aeefd",
       "lastChanged": "2026-05-31T22:41:52.000Z",
       "migrationFile": "20260531T224152-procedures.ts",
+      "conflict": false
+    },
+    "rls:playground_items": {
+      "kind": "rls-enable",
+      "hash": "sha256:27c24cde9221cca5815e8c880747696a9a292fa51ee18fbdd8f5578165c0cef8",
+      "lastChanged": "2026-06-01T08:05:51.000Z",
+      "migrationFile": "20260601T080551-procedures.ts",
+      "conflict": false
+    },
+    "policy:playground_items_tenant_isolation": {
+      "kind": "rls-policy",
+      "hash": "sha256:c1836daa39be6b8a4465a149854e81147fd854f0e7895e3bea1957bffd4687aa",
+      "lastChanged": "2026-06-01T08:05:51.000Z",
+      "migrationFile": "20260601T080551-procedures.ts",
       "conflict": false
     }
   }

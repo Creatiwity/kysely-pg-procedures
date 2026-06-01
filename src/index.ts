@@ -35,9 +35,7 @@ export type {
   PolicyPermissiveness,
   PolicyOpts,
   PolicyDef,
-  PolicyBody,
   PolicyBodyCtx,
-  ColProxy,
   SessionProxy,
 } from './rls.js'
 

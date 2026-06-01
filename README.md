@@ -112,6 +112,66 @@ const trigger = defineTrigger(
 export default [trigger]
 ```
 
+### Row-Level Security (RLS)
+
+Define RLS policies alongside your triggers — same DSL, same migration workflow, same KPP tamper detection.
+
+```typescript
+import { defineSessionVars, enableRls, definePolicy } from 'kysely-pg-procedures'
+
+// 1. Declare session variables set by your middleware
+const session = defineSessionVars({
+  orgId:  'uuid',   // SET LOCAL app.orgId = '<uuid>'
+  userId: 'uuid',   // SET LOCAL app.userId = '<uuid>'
+})
+
+// 2. Enable RLS on the table
+const rlsItems = enableRls<DB>()('items', { force: true })
+
+// 3. Define a policy (table name is type-checked against DB schema)
+const tenantPolicy = definePolicy<DB>()(
+  'items',
+  {
+    name:    'items_tenant_isolation',
+    as:      'PERMISSIVE',
+    command: 'ALL',
+    roles:   ['app_user'],
+  },
+  session,
+  {
+    // col.xxx → "xxx" (typed to columns of DB['items'])
+    // session.orgId → current_setting('app.orgId', true)::uuid
+    using:     ({ col, session: s }) => sql.raw(`${col.org_id.text} = ${s.orgId.text}`),
+    withCheck: ({ col, session: s }) => sql.raw(`${col.org_id.text} = ${s.orgId.text}`),
+  },
+)
+
+export default [rlsItems, tenantPolicy, myTrigger]
+```
+
+**Compilation output:**
+```sql
+ALTER TABLE "items" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "items" FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "items_tenant_isolation" ON "items";
+CREATE POLICY "items_tenant_isolation" ON "items" AS PERMISSIVE FOR ALL TO app_user
+    USING ("org_id" = current_setting('app.orgId', true)::uuid)
+    WITH CHECK ("org_id" = current_setting('app.orgId', true)::uuid);
+```
+
+No `CREATE OR REPLACE POLICY` (requires PG 17) — uses `DROP IF EXISTS` + `CREATE` for broad compatibility.
+
+**Session variables** are set by your HTTP middleware before each request:
+```typescript
+await sql`SET LOCAL "app.orgId" = ${ctx.org.id}`.execute(db)
+await sql`SET LOCAL "app.userId" = ${ctx.user.id}`.execute(db)
+```
+
+**`proc:generate`** includes RLS entries in the migration file with KPP markers (`kind="rls-enable"` / `kind="rls-policy"`). **`proc:status`** tracks and detects tampering for RLS blocks the same way it does for procedures.
+
+---
+
 ### STATEMENT triggers and temp tables
 
 For `FOR EACH STATEMENT` triggers, use `defineProcedure` and define temp tables with `defineTempTable`. Give temp tables an alias for ergonomic access via `db[alias]`.
