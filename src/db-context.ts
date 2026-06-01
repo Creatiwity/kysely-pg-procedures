@@ -96,6 +96,8 @@ export interface DbSelectBuilder {
   select(...args: Parameters<SelectQueryBuilder<any, any, any>['select']>): DbSelectBuilder
   selectAll(...args: Parameters<SelectQueryBuilder<any, any, any>['selectAll']>): DbSelectBuilder
   into(vars: Record<string, SqlFragment>, opts?: { strict?: boolean }): void
+  /** Exposes compile() so DbSelectBuilder satisfies the Compilable interface. */
+  compile(): { sql: string; parameters: readonly unknown[] }
 }
 
 /**

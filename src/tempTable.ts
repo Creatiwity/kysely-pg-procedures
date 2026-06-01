@@ -3,7 +3,7 @@ import { sql } from './sql.js'
 import { isCompilable, toSqlFragment } from './kysely-compile.js'
 import type { Compilable } from './kysely-compile.js'
 import { sql as kyselySql } from 'kysely'
-import type { RawBuilder } from 'kysely'
+import type { RawBuilder, SqlBool } from 'kysely'
 
 export interface TempTableHelper<TCols extends TempTableColumns = TempTableColumns> {
   readonly name: string
@@ -15,14 +15,14 @@ export interface TempTableHelper<TCols extends TempTableColumns = TempTableColum
   exists(where?: SqlFragment): SqlFragment
   notExists(where?: SqlFragment): SqlFragment
   /**
-   * Returns a Kysely RawBuilder<unknown> (not our SqlFragment) so it can be
-   * used directly in Kysely query builders (.where, .select, etc.) AND in our
-   * sql template tag (which now handles Compilable via toSqlFragment).
+   * Returns a Kysely `RawBuilder<SqlBool>` so it can be used directly in
+   * Kysely query builders (.where, .set, etc.) AND in our sql template tag
+   * (which handles Compilable via toSqlFragment).
    *
    * Before: sql`... WHERE ${filter('m')}`  — only in our sql template
    * After:  .where(filter('m'))             — also in Kysely builders ✓
    */
-  filter(alias: string): RawBuilder<unknown>
+  filter(alias: string): RawBuilder<SqlBool>
 }
 
 // Overload 1: no alias → TAs = undefined (key in db context = table name)
@@ -54,8 +54,8 @@ export function buildTempTableHelper<T extends TempTableDef>(def: T): TempTableH
     ref: tableRef,
     instanceFilter,
 
-    filter(alias: string): RawBuilder<unknown> {
-      return kyselySql.raw(`${alias}."_proc_instance_id" = _proc_instance_id`)
+    filter(alias: string): RawBuilder<SqlBool> {
+      return kyselySql.raw<SqlBool>(`${alias}."_proc_instance_id" = _proc_instance_id`)
     },
 
     insert(values): Statement {
