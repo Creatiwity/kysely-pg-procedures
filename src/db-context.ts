@@ -93,8 +93,10 @@ export interface DbSelectBuilder {
   having(...args: Parameters<SelectQueryBuilder<any, any, any>['having']>): DbSelectBuilder
   limit(...args: Parameters<SelectQueryBuilder<any, any, any>['limit']>): DbSelectBuilder
   offset(...args: Parameters<SelectQueryBuilder<any, any, any>['offset']>): DbSelectBuilder
-  select(...args: Parameters<SelectQueryBuilder<any, any, any>['select']>): DbSelectBuilder
-  selectAll(...args: Parameters<SelectQueryBuilder<any, any, any>['selectAll']>): DbSelectBuilder
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  select(...args: any[]): DbSelectBuilder
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  selectAll(...args: any[]): DbSelectBuilder
   into(vars: Record<string, SqlFragment>, opts?: { strict?: boolean }): void
   /** Exposes compile() so DbSelectBuilder satisfies the Compilable interface. */
   compile(): { sql: string; parameters: readonly unknown[] }
