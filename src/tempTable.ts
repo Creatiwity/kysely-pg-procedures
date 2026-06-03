@@ -1,9 +1,49 @@
-import type { TempTableColumns, TempTableDef, SqlFragment, Statement } from './types.js'
+import type { TempTableColumns, TempTableDef, ColumnDef, ColumnType, SqlFragment, Statement } from './types.js'
 import { sql } from './sql.js'
 import { isCompilable, toSqlFragment } from './kysely-compile.js'
 import type { Compilable } from './kysely-compile.js'
 import { sql as kyselySql } from 'kysely'
 import type { RawBuilder, SqlBool } from 'kysely'
+
+// ---------------------------------------------------------------------------
+// ColumnDef → TypeScript type mapping
+// ---------------------------------------------------------------------------
+
+/** Maps a ColumnType string literal to its TypeScript equivalent. */
+export type ColumnTypeToTs<T extends ColumnType> =
+  T extends 'uuid' | 'text' | 'varchar' ? string
+  : T extends 'integer' | 'smallint' | 'bigint' | 'numeric' | 'decimal' | 'real' | 'float' ? number
+  : T extends 'boolean' ? boolean
+  : T extends 'timestamptz' | 'timestamp' | 'date' | 'time' ? Date
+  : T extends 'jsonb' | 'json' ? Record<string, unknown>
+  : T extends 'bytea' ? Uint8Array
+  : never
+
+/** Maps a ColumnDef (type string or { type, nullable }) to its TypeScript type. */
+export type ColumnDefToTs<C extends ColumnDef> =
+  C extends ColumnType
+    ? ColumnTypeToTs<C>
+    : C extends { type: infer T extends ColumnType; nullable?: infer N }
+      ? N extends true
+        ? ColumnTypeToTs<T> | null
+        : ColumnTypeToTs<T>
+      : never
+
+/**
+ * Converts a TempTableColumns record to a Kysely-compatible row type.
+ * The `_proc_instance_id` column is always present (used for isolation).
+ */
+export type TempTableRow<TCols extends TempTableColumns> = {
+  readonly [K in keyof TCols & string]: ColumnDefToTs<TCols[K]>
+} & { readonly _proc_instance_id: string }
+
+/**
+ * Maps each TempTableDef to its Kysely-typed row, keyed by table name.
+ * Used to extend the DB type parameter so Kysely knows temp table columns.
+ */
+export type TempTableDbExt<TTables extends TempTableDef[]> = {
+  [K in TTables[number] as K['name']]: TempTableRow<Extract<TTables[number], { name: K['name'] }>['columns']>
+}
 
 export interface TempTableHelper<TCols extends TempTableColumns = TempTableColumns> {
   readonly name: string

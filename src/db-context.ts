@@ -4,8 +4,8 @@ import { sql } from './sql.js'
 import { compileDb, isCompilable, toSqlFragment, extractFromClause } from './kysely-compile.js'
 import type { Compilable } from './kysely-compile.js'
 import { buildTempTableAliasMap } from './tempTable.js'
-import type { TempTableHelper, TempTableAliasMap } from './tempTable.js'
-import type { SelectQueryBuilder, AnyColumn } from 'kysely'
+import type { TempTableHelper, TempTableAliasMap, TempTableDbExt } from './tempTable.js'
+import type { Kysely, SelectQueryBuilder } from 'kysely'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,34 +82,49 @@ export type IfCondition =
   | ColumnRef
   | [ColumnRef | SqlFragment, string, SqlFragment | string | number]
 
-/** A wrapped SelectQueryBuilder extended with .into() */
-export interface DbSelectBuilder {
-  where(...args: Parameters<SelectQueryBuilder<any, any, any>['where']>): DbSelectBuilder
-  innerJoin(...args: Parameters<SelectQueryBuilder<any, any, any>['innerJoin']>): DbSelectBuilder
-  leftJoin(...args: Parameters<SelectQueryBuilder<any, any, any>['leftJoin']>): DbSelectBuilder
-  rightJoin(...args: Parameters<SelectQueryBuilder<any, any, any>['rightJoin']>): DbSelectBuilder
-  orderBy(...args: Parameters<SelectQueryBuilder<any, any, any>['orderBy']>): DbSelectBuilder
-  groupBy(...args: Parameters<SelectQueryBuilder<any, any, any>['groupBy']>): DbSelectBuilder
-  having(...args: Parameters<SelectQueryBuilder<any, any, any>['having']>): DbSelectBuilder
-  limit(...args: Parameters<SelectQueryBuilder<any, any, any>['limit']>): DbSelectBuilder
-  offset(...args: Parameters<SelectQueryBuilder<any, any, any>['offset']>): DbSelectBuilder
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  select(...args: any[]): DbSelectBuilder
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  selectAll(...args: any[]): DbSelectBuilder
-  into(vars: Record<string, SqlFragment>, opts?: { strict?: boolean }): void
-  /** Exposes compile() so DbSelectBuilder satisfies the Compilable interface. */
-  compile(): { sql: string; parameters: readonly unknown[] }
+/**
+ * Module augmentation — adds `.into()` to every Kysely SelectQueryBuilder.
+ * The runtime implementation is injected by wrapSelectBuilder() via a Proxy.
+ * This augmentation is the only addition to Kysely's type system made by this
+ * library; it avoids redeclaring any of Kysely's existing query-building types.
+ */
+declare module 'kysely' {
+  interface SelectQueryBuilder<DB, TB extends keyof DB, O> {
+    /**
+     * PL/pgSQL SELECT INTO terminator — compiles to:
+     *   SELECT expr1, expr2 INTO var1, var2 FROM ... WHERE ...
+     *
+     * Only valid inside a `defineProcedure` / `defineRowProcedure` body.
+     */
+    into(vars: Record<string, SqlFragment>, opts?: { strict?: boolean }): void
+  }
 }
+
+/**
+ * The combined DB type: user schema + temp table rows.
+ * Used as the DB type parameter for typed Kysely query builders.
+ *
+ * @internal exposed for use in procedure.ts
+ */
+export type ExtendedDB<
+  TDB extends Record<string, Record<string, unknown>>,
+  TTables extends TempTableDef[],
+> = TDB & TempTableDbExt<TTables>
 
 /**
  * The imperative db context exposed to the procedure callback.
  *
- * TAliases is the map of temp table helpers keyed by alias, produced by
- * TempTableAliasMap<TTables> and intersected here so that db.myAlias is
- * fully typed as TempTableHelper<columns>.
+ * TDB      — the user's database schema type (table name → row type). Defaults
+ *             to a permissive Record so callers without schema types still work.
+ * TTables  — the temp tables declared for this procedure (TempTableDef[]).
+ * TAliases — TempTableAliasMap<TTables>: temp table helpers keyed by alias,
+ *             intersected here so that db.myAlias is fully typed.
  */
-export type DbContext<TAliases extends Record<string, unknown> = Record<never, never>> = {
+export type DbContext<
+  TDB extends Record<string, Record<string, unknown>> = Record<string, Record<string, unknown>>,
+  TTables extends TempTableDef[] = [],
+  TAliases extends Record<string, unknown> = Record<never, never>,
+> = {
   /** Proxy — db.NEW itself is a RowProxy (compiles to NEW); db.NEW.col is a ColumnRef */
   readonly NEW: RowProxy
   /** Proxy — db.OLD itself is a RowProxy (compiles to OLD); db.OLD.col is a ColumnRef */
@@ -126,14 +141,24 @@ export type DbContext<TAliases extends Record<string, unknown> = Record<never, n
   /** CASE expr WHEN … THEN … [ELSE …] END CASE */
   switch(col: SqlFragment | ColumnRef, cases: Record<string, () => void>): void
 
-  /** SELECT … FROM … (returns a Kysely builder extended with .into()) */
-  selectFrom(table: string): DbSelectBuilder
+  /**
+   * SELECT … FROM … — delegates to Kysely's native selectFrom, typed against
+   * the combined schema (user DB + temp tables). Returns the standard Kysely
+   * SelectQueryBuilder extended with `.into()` via module augmentation.
+   */
+  selectFrom: Kysely<ExtendedDB<TDB, TTables>>['selectFrom']
 
-  /** CTE wrapper — delegates to compileDb.withRecursive */
-  withRecursive: (typeof compileDb)['withRecursive']
+  /** CTE wrapper — typed against the combined schema */
+  withRecursive: Kysely<ExtendedDB<TDB, TTables>>['withRecursive']
 
-  /** UPDATE wrapper — delegates to compileDb.updateTable */
-  updateTable: (typeof compileDb)['updateTable']
+  /** UPDATE wrapper — typed against the combined schema */
+  updateTable: Kysely<ExtendedDB<TDB, TTables>>['updateTable']
+
+  /** DELETE wrapper — typed against the combined schema */
+  deleteFrom: Kysely<ExtendedDB<TDB, TTables>>['deleteFrom']
+
+  /** INSERT wrapper — typed against the combined schema */
+  insertInto: Kysely<ExtendedDB<TDB, TTables>>['insertInto']
 
   /** Execute a raw SQL statement */
   execute(query: SqlFragment | Compilable, opts?: { label?: string }): void
@@ -265,36 +290,53 @@ function makeVarProxy(): Record<string, ColumnRef> {
 // Wrapped select builder
 // ---------------------------------------------------------------------------
 
-function wrapSelectBuilder(kysely: SelectQueryBuilder<any, any, any>): DbSelectBuilder {
-  const proxy: DbSelectBuilder = new Proxy({} as DbSelectBuilder, {
-    get(_target, prop: string | symbol) {
+/**
+ * Wraps a Kysely SelectQueryBuilder with a runtime Proxy that intercepts
+ * `.into()` calls — the only method Kysely doesn't provide natively.
+ * All other accesses (where, select, innerJoin, compile, …) are forwarded
+ * directly to the underlying builder via Reflect.get, preserving Kysely's
+ * native behaviour. Chained methods that return SelectQueryBuilders are
+ * re-wrapped so `.into()` remains interceptable throughout the chain.
+ */
+function wrapSelectBuilder(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  inner: SelectQueryBuilder<any, any, any>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): SelectQueryBuilder<any, any, any> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new Proxy(inner, {
+    get(target, prop: string | symbol) {
       if (prop === 'into') {
         return (vars: Record<string, SqlFragment>, opts?: { strict?: boolean }) => {
-          const fromClause = extractFromClause(kysely)
-          push({
-            kind: 'selectInto',
-            vars,
-            from: fromClause,
-            strict: opts?.strict,
-          })
+          const fromClause = extractFromClause(target)
+          push({ kind: 'selectInto', vars, from: fromClause, strict: opts?.strict })
         }
       }
-      // Delegate to the kysely builder and re-wrap the result
-      const method = (kysely as any)[prop as string]
-      if (typeof method === 'function') {
-        return (...args: unknown[]) => {
-          const next = method.apply(kysely, args)
-          // If result is still a query builder, wrap it; otherwise return raw
-          if (next && typeof next === 'object' && typeof (next as any).compile === 'function') {
-            return wrapSelectBuilder(next as SelectQueryBuilder<any, any, any>)
-          }
-          return next
+
+      const val = Reflect.get(target, prop, target)
+      if (typeof val !== 'function') return val
+
+      return (...args: unknown[]) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = (val as (...a: unknown[]) => unknown).apply(target, args)
+        // Re-wrap SelectQueryBuilder results (has .select + .where) so .into()
+        // remains available throughout the chain.
+        if (
+          result !== null &&
+          typeof result === 'object' &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          typeof (result as any).select === 'function' &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          typeof (result as any).where === 'function'
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return wrapSelectBuilder(result as SelectQueryBuilder<any, any, any>)
         }
+        return result
       }
-      return undefined
     },
-  })
-  return proxy
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as SelectQueryBuilder<any, any, any>
 }
 
 // ---------------------------------------------------------------------------
@@ -312,10 +354,13 @@ function wrapHelperForPush(helper: TempTableHelper): TempTableHelper {
   }
 }
 
-export function buildDbContext<TTables extends TempTableDef[]>(
+export function buildDbContext<
+  TTables extends TempTableDef[],
+  TDB extends Record<string, Record<string, unknown>> = Record<string, Record<string, unknown>>,
+>(
   tempTables: TTables,
   vars: VarDecls,
-): { db: DbContext<TempTableAliasMap<TTables>>; getStatements(): Statement[] } {
+): { db: DbContext<TDB, TTables, TempTableAliasMap<TTables>>; getStatements(): Statement[] } {
   const aliasMap: Record<string, TempTableHelper> = Object.fromEntries(
     Object.entries(buildTempTableAliasMap(tempTables)).map(([k, h]) => [k, wrapHelperForPush(h)])
   )
@@ -327,6 +372,12 @@ export function buildDbContext<TTables extends TempTableDef[]>(
   function getStatements(): Statement[] {
     return rootStatements
   }
+
+  // Cast compileDb to a typed Kysely instance for the combined schema.
+  // At runtime this is still the same Kysely<any> singleton — the cast only
+  // affects TypeScript's view of the query methods.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const typedDb = compileDb as unknown as Kysely<ExtendedDB<TDB, TTables>>
 
   // Core db methods (not proxied)
   const dbMethods = {
@@ -374,13 +425,20 @@ export function buildDbContext<TTables extends TempTableDef[]>(
       push({ kind: 'case', expr: col as SqlFragment, branches, else: elseStmts })
     },
 
-    selectFrom(table: string): DbSelectBuilder {
-      const builder = compileDb.selectFrom(table as any)
+    // selectFrom: wraps the native Kysely builder with the runtime .into() proxy,
+    // then casts to the correct WithInto<...> type. The `as any` on `from` is needed
+    // because compileDb is Kysely<any> at runtime — the typed facade is TypeScript-only.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    selectFrom(from: any): any {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const builder = typedDb.selectFrom(from as any)
       return wrapSelectBuilder(builder as unknown as SelectQueryBuilder<any, any, any>)
     },
 
-    withRecursive: compileDb.withRecursive.bind(compileDb),
-    updateTable: compileDb.updateTable.bind(compileDb),
+    withRecursive: typedDb.withRecursive.bind(typedDb),
+    updateTable: typedDb.updateTable.bind(typedDb),
+    deleteFrom: typedDb.deleteFrom.bind(typedDb),
+    insertInto: typedDb.insertInto.bind(typedDb),
 
     execute(query: SqlFragment | Compilable, opts?: { label?: string }): void {
       push({ kind: 'raw', sql: toSqlFragment(query), label: opts?.label })
@@ -427,11 +485,13 @@ export function buildDbContext<TTables extends TempTableDef[]>(
 
   // The db proxy: falls through to aliasMap for temp table aliases, delegates
   // everything else to dbMethods.
-  const db = new Proxy(dbMethods as unknown as DbContext<TempTableAliasMap<TTables>>, {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = new Proxy(dbMethods as unknown as DbContext<TDB, TTables, TempTableAliasMap<TTables>>, {
     get(target, prop: string | symbol) {
       if (typeof prop !== 'string') return undefined
 
       // Check built-in methods first
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if (prop in target) {
         return (target as any)[prop]
       }
@@ -466,5 +526,5 @@ export function buildDbContext<TTables extends TempTableDef[]>(
         _stack.pop()
       }
     },
-  } as unknown as { db: DbContext<TempTableAliasMap<TTables>>; getStatements(): Statement[] } & { _runWithRootFrame: (cb: () => void) => void }
+  } as unknown as { db: DbContext<TDB, TTables, TempTableAliasMap<TTables>>; getStatements(): Statement[] } & { _runWithRootFrame: (cb: () => void) => void }
 }
