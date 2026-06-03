@@ -172,6 +172,71 @@ await sql`SET LOCAL "app.userId" = ${ctx.user.id}`.execute(db)
 
 ---
 
+### Typed temp tables with proc:codegen
+
+By default, `db.selectFrom('MyTempTable')` inside a procedure body isn't type-checked against the temp table's columns. Run `proc:codegen` to generate a per-procedure DB extension file that makes temp tables visible to Kysely's type system.
+
+**1. Add to `kysely-procedures.config.ts`:**
+```typescript
+codegen: {
+  // Same format as kysely-codegen's import
+  dbImport: "import type { Database as DB } from './generated/database.js'",
+  output: 'src/db-proc.generated.ts',
+}
+```
+
+**2. Run the generator:**
+```bash
+npm run proc:codegen
+```
+
+**3. Generated file (`db-proc.generated.ts`):**
+```typescript
+// AUTO-GENERATED — DO NOT EDIT
+
+import type { Database as DB } from './generated/database.js'
+
+export interface DBProcMyAuditProc extends DB {
+  readonly __proc: 'my_audit_proc'   // discriminant for TypeScript narrowing
+  MyTempTable: {
+    readonly _proc_instance_id: string
+    readonly userId: string
+    readonly amount: number | null
+  }
+}
+
+export type DBProc = DBProcMyAuditProc | ...
+
+export type ProcDBMap = {
+  'my_audit_proc': DBProcMyAuditProc
+  // one entry per procedure
+}
+```
+
+**4. Use `withProcDB<ProcDBMap>()`** — the procedure name selects the right extended DB type automatically; no type parameter needed at each call site:
+
+```typescript
+import { withProcDB } from 'kysely-pg-procedures'
+import type { ProcDBMap } from './db-proc.generated'
+
+const { defineRowProcedure, defineRowTrigger } = withProcDB<ProcDBMap>()
+
+// `procedureName` discriminates → body typed with DBProcMyAuditProc
+const proc = defineRowProcedure(
+  'items',
+  { name: 'my_audit_proc', ... },
+  [myTempTable], {},
+  ({ db }) => {
+    db.selectFrom('MyTempTable').select(['userId'])  // ✓ type-checked
+    db.modified.insertFrom(...)                       // ✓ alias still works
+  },
+)
+```
+
+Re-run `proc:codegen` whenever you add or modify a temp table definition.
+
+---
+
 ### STATEMENT triggers and temp tables
 
 For `FOR EACH STATEMENT` triggers, use `defineProcedure` and define temp tables with `defineTempTable`. Give temp tables an alias for ergonomic access via `db[alias]`.
@@ -307,6 +372,8 @@ export default config
 
 The config file is auto-discovered as `kysely-procedures.config.ts` in the project root, or pass `--config <path>` to any CLI command.
 
+Add a `codegen` section if you use `proc:codegen` (see [Typed temp tables with proc:codegen](#typed-temp-tables-with-proccodegen)).
+
 ### 2. Procedure files
 
 Each file exports a default array of trigger or procedure definitions:
@@ -397,6 +464,7 @@ If two branches each generate a migration for the same procedure, `proc:status` 
 |--------|-------------|
 | `defineRowTrigger<DB>()` | One-step: ROW trigger + backing function; table name typed against DB schema |
 | `defineRowProcedure<DB>()` | Row procedure only (attach with `defineTrigger`) |
+| `withProcDB<ProcDBMap>()` | Pre-bind all factories to a codegen'd `ProcDBMap`; proc name acts as discriminant |
 | `defineTrigger(opts, proc)` | Attach a trigger to an existing procedure definition |
 | `defineProcedure(opts, tempTables, vars, body)` | Low-level: any procedure type (STATEMENT triggers, RETURNS VOID helpers, etc.) |
 | `defineTempTable(name, columns, { as? })` | Define a temp table; accessible as `db[alias]` in the body |
