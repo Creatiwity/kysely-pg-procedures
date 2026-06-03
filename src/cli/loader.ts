@@ -4,6 +4,10 @@ import { compileProcedure, compileTrigger } from '../../src/compiler.js'
 import { compilePolicyBlock, compileRlsEnable } from '../../src/rls.js'
 import { hashSql } from './hash.js'
 import type { CompiledDef } from './types.js'
+import type { TriggerDefinition, ProcedureDefinition } from '../../src/procedure.js'
+import type { RlsEnableDef, PolicyDef } from '../../src/rls.js'
+
+type AnyDef = TriggerDefinition | ProcedureDefinition | RlsEnableDef | PolicyDef
 
 function globToRegex(pattern: string): RegExp {
   // Escape special regex chars except * which we handle below
@@ -159,4 +163,37 @@ export async function loadCompiledDefs(globs: string[], cwd: string): Promise<Co
   }
 
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * Load raw definition objects from source files — no compilation, no hashing.
+ * The procedure body functions are stored but never called; only metadata
+ * (name, tempTables, vars) is accessed. Used by proc:codegen.
+ */
+export async function loadRawDefs(globs: string[], cwd: string): Promise<AnyDef[]> {
+  const matchedFiles = new Set<string>()
+  for (const pattern of globs) {
+    for (const file of expandGlob(pattern, cwd)) {
+      matchedFiles.add(file)
+    }
+  }
+
+  const allDefs: AnyDef[] = []
+
+  for (const absolutePath of matchedFiles) {
+    try {
+      const mod = await import(absolutePath)
+      const exports: unknown[] = mod.default ?? mod.procedures
+      if (!Array.isArray(exports)) continue
+      for (const def of exports) {
+        if (def && typeof def === 'object' && '_tag' in def) {
+          allDefs.push(def as AnyDef)
+        }
+      }
+    } catch {
+      // skip files that can't be imported (e.g. playground/index.ts with side effects)
+    }
+  }
+
+  return allDefs
 }

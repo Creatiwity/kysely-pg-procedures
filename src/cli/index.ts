@@ -2,6 +2,7 @@ import { loadConfig } from './config.js'
 import { runGenerate } from './generate.js'
 import { runStatus } from './status.js'
 import { rebuildManifest, saveManifest } from './manifest.js'
+import { runCodegen } from './codegen.js'
 import { resolve } from 'node:path'
 
 function parseArgs(argv: string[]): {
@@ -52,6 +53,7 @@ Commands:
   status            Check consistency of source procedures vs migration files
   generate          Generate a new migration for new/modified procedures
   manifest-rebuild  Rebuild the manifest from migration files (safe after merge)
+  codegen           Generate db-proc.generated.ts with per-proc extended DB types
 
 Flags:
   --config <path>   Path to config file (default: kpp.config.ts)
@@ -92,6 +94,12 @@ async function main(): Promise<void> {
     await saveManifest(manifestPath, manifest)
     const count = Object.keys(manifest.entries).length
     console.log(`Manifest rebuilt from migration files. ${count} entries.`)
+    return
+  }
+
+  if (command === 'codegen') {
+    const config = await loadConfig(configPath)
+    await runCodegen(config, process.cwd())
     return
   }
 
