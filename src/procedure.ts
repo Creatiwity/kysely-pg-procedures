@@ -18,9 +18,12 @@ import type { TempTableAliasMap } from './tempTable.js'
 // Types
 // ---------------------------------------------------------------------------
 
-export type ProcedureCallback<TTables extends TempTableDef[] = []> = (ctx: {
+export type ProcedureCallback<
+  TDB extends Record<string, Record<string, unknown>> = Record<string, Record<string, unknown>>,
+  TTables extends TempTableDef[] = [],
+> = (ctx: {
   sql: typeof sql
-  db: DbContext<TempTableAliasMap<TTables>>
+  db: DbContext<TDB, TTables, TempTableAliasMap<TTables>>
 }) => void
 
 export interface ProcedureOptions {
@@ -52,7 +55,7 @@ export interface ProcedureDefinition {
   readonly tempTables: TempTableDef[]
   readonly vars: VarDecls
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly body: ProcedureCallback<any>   // erased: any bypasses contra-variance at storage site
+  readonly body: ProcedureCallback<any, any>   // erased: any bypasses contra-variance at storage site
 }
 
 export interface TriggerDefinition {
@@ -72,11 +75,14 @@ export interface TriggerDefinition {
 // defineProcedure
 // ---------------------------------------------------------------------------
 
-export function defineProcedure<TTables extends TempTableDef[] = []>(
+export function defineProcedure<
+  TDB extends Record<string, Record<string, unknown>> = Record<string, Record<string, unknown>>,
+  TTables extends TempTableDef[] = [],
+>(
   options: ProcedureOptions,
   tempTables: TTables,
   vars: VarDecls,
-  body: ProcedureCallback<TTables>,
+  body: ProcedureCallback<TDB, TTables>,
 ): ProcedureDefinition {
   return {
     _tag: 'Procedure',
@@ -120,6 +126,106 @@ export function executeBody(def: ProcedureDefinition): Statement[] {
 }
 
 // ---------------------------------------------------------------------------
+// defineStatementTrigger
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper type: extends DB with typed transition tables from REFERENCING.
+ * TRefNew → typed as DB[TTable]; TRefOld → typed as DB[TTable].
+ * `never` keys are omitted (no REFERENCING clause for that direction).
+ */
+export type WithTransitionTables<
+  TDB extends Record<string, Record<string, unknown>>,
+  TTable extends keyof TDB & string,
+  TRefNew extends string,
+  TRefOld extends string,
+> = TDB &
+  ([TRefNew] extends [never] ? Record<never, never> : { [K in TRefNew]: TDB[TTable] }) &
+  ([TRefOld] extends [never] ? Record<never, never> : { [K in TRefOld]: TDB[TTable] })
+
+export interface StatementTriggerOptions<
+  TRefNew extends string = never,
+  TRefOld extends string = never,
+> {
+  name: string
+  procedureName: string
+  timing: TriggerTiming
+  events: TriggerEvent[]
+  /** Transition table aliases — inferred as literal types for typed selectFrom. */
+  referencing?: {
+    new?: TRefNew
+    old?: TRefOld
+  }
+  when?: SqlFragment
+}
+
+/**
+ * Factory for FOR EACH STATEMENT triggers with typed transition tables.
+ *
+ * The `referencing` aliases are inferred as literal types so
+ * `db.selectFrom('inserted')` and `db.selectFrom('removed')` are
+ * fully type-checked as the trigger table's row type.
+ *
+ * ```ts
+ * const trigger = defineStatementTrigger<DB>()(
+ *   'items',
+ *   {
+ *     name: 'trg_audit', procedureName: 'fn_audit',
+ *     timing: 'AFTER', events: ['UPDATE'],
+ *     referencing: { old: 'removed', new: 'inserted' },
+ *   },
+ *   [modifiedTable], {},
+ *   ({ db }) => {
+ *     db.modified.insertFrom(['id'], db.selectFrom('inserted').select(['id']))
+ *     //                                                ↑ typed as DB['items'] ✓
+ *   },
+ * )
+ * ```
+ */
+export function defineStatementTrigger<TSchema extends Record<string, Record<string, unknown>>>() {
+  return function <
+    TTable extends keyof TSchema & string,
+    TTables extends TempTableDef[] = [],
+    TRefNew extends string = never,
+    TRefOld extends string = never,
+  >(
+    table: TTable,
+    options: StatementTriggerOptions<TRefNew, TRefOld>,
+    tempTables: TTables,
+    vars: VarDecls,
+    body: (ctx: {
+      sql: typeof sql
+      db: DbContext<
+        WithTransitionTables<TSchema, TTable, TRefNew, TRefOld>,
+        TTables,
+        TempTableAliasMap<TTables>
+      >
+    }) => void,
+  ): TriggerDefinition {
+    const proc = defineProcedure<WithTransitionTables<TSchema, TTable, TRefNew, TRefOld>, TTables>(
+      { name: options.procedureName },
+      tempTables,
+      vars,
+      body,
+    )
+    return defineTrigger(
+      {
+        name: options.name,
+        table,
+        timing: options.timing,
+        events: options.events,
+        forEach: 'STATEMENT',
+        referencing: options.referencing
+          ? { old: options.referencing.old, new: options.referencing.new }
+          : undefined,
+        when: options.when,
+      },
+      proc,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
 // defineTrigger  (unchanged from existing implementation)
 // ---------------------------------------------------------------------------
 
@@ -146,13 +252,81 @@ export function defineTrigger(
 // ---------------------------------------------------------------------------
 
 /**
- * Conditional row-ref availability based on trigger events:
- * - INSERT or UPDATE → NEW is available
- * - UPDATE or DELETE → OLD is available
+ * Context passed to the body of a FOR EACH ROW trigger or procedure.
+ *
+ * `NEW` and `OLD` are always present as typed proxies (they compile to
+ * `NEW."col"` / `OLD."col"` in PL/pgSQL). PostgreSQL sets them to NULL for
+ * events that don't populate them, but you should access them only inside the
+ * appropriate `whenInsert` / `whenUpdate` / `whenDelete` scope.
+ *
+ * `whenInsert`, `whenUpdate`, `whenDelete` generate `IF TG_OP = '...' THEN`
+ * blocks. Inside each callback, TypeScript guarantees the right refs are
+ * non-null. Code outside these blocks runs unconditionally regardless of event.
+ *
+ * ```ts
+ * defineRowTrigger<DB>()('items', opts, [modifiedTable], {}, ({ db, whenInsert, whenUpdate, whenDelete }) => {
+ *   // Event-specific: insert into temp table based on operation
+ *   whenInsert(({ NEW }) => db.modified.insert({ itemId: NEW.id }))
+ *   whenUpdate(({ NEW, OLD }) => db.modified.insert({ itemId: NEW.id }))
+ *   whenDelete(({ OLD }) => db.modified.insert({ itemId: OLD.id }))
+ *
+ *   // Unified processing — runs after the event-specific block
+ *   db.if(db.modified.notExists(), () => { db.return(sql`NULL`) })
+ *   db.return(sql`NULL`)
+ * })
+ * ```
  */
-type RowRefs<TRow, TEvents extends readonly TriggerEvent[]> =
-  ([Extract<TEvents[number], 'INSERT' | 'UPDATE'>] extends [never] ? unknown : { NEW: TypedRowRef<TRow> }) &
-  ([Extract<TEvents[number], 'UPDATE' | 'DELETE'>] extends [never] ? unknown : { OLD: TypedRowRef<TRow> })
+export interface RowBodyContext<
+  TRow,
+  TDB extends Record<string, Record<string, unknown>>,
+  TTables extends TempTableDef[],
+> {
+  sql: typeof sql
+  db: DbContext<TDB, TTables, TempTableAliasMap<TTables>>
+  /** NEW row proxy — use inside whenNew / whenInsert / whenUpdate. */
+  NEW: TypedRowRef<TRow>
+  /** OLD row proxy — use inside whenOld / whenUpdate / whenDelete. */
+  OLD: TypedRowRef<TRow>
+
+  /**
+   * `IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE'` — fires whenever NEW is non-null.
+   * Avoids duplicating NEW-handling logic between whenInsert and whenUpdate.
+   */
+  whenNew(cb: (ctx: { NEW: TypedRowRef<TRow> }) => void): void
+  /**
+   * `IF TG_OP = 'UPDATE' OR TG_OP = 'DELETE'` — fires whenever OLD is non-null.
+   * Avoids duplicating OLD-handling logic between whenUpdate and whenDelete.
+   */
+  whenOld(cb: (ctx: { OLD: TypedRowRef<TRow> }) => void): void
+
+  /** `IF TG_OP = 'INSERT'` — NEW guaranteed non-null, OLD is NULL. */
+  whenInsert(cb: (ctx: { NEW: TypedRowRef<TRow> }) => void): void
+  /** `IF TG_OP = 'UPDATE'` — both NEW and OLD guaranteed non-null. */
+  whenUpdate(cb: (ctx: { NEW: TypedRowRef<TRow>; OLD: TypedRowRef<TRow> }) => void): void
+  /** `IF TG_OP = 'DELETE'` — OLD guaranteed non-null, NEW is NULL. */
+  whenDelete(cb: (ctx: { OLD: TypedRowRef<TRow> }) => void): void
+}
+
+/** @internal Creates the ProcedureCallback from a RowBodyContext body function. */
+export function makeRowBodyCallback<TRow, TDB extends Record<string, Record<string, unknown>>, TTables extends TempTableDef[]>(
+  body: (ctx: RowBodyContext<TRow, TDB, TTables>) => void,
+  newRef: TypedRowRef<TRow>,
+  oldRef: TypedRowRef<TRow>,
+): ProcedureCallback<TDB, TTables> {
+  return ({ sql: s, db }) => {
+    body({
+      sql: s,
+      db,
+      NEW: newRef,
+      OLD: oldRef,
+      whenNew(cb)    { db.if(sql.raw("TG_OP = 'INSERT' OR TG_OP = 'UPDATE'"), () => cb({ NEW: newRef })) },
+      whenOld(cb)    { db.if(sql.raw("TG_OP = 'UPDATE' OR TG_OP = 'DELETE'"), () => cb({ OLD: oldRef })) },
+      whenInsert(cb) { db.if(sql.raw("TG_OP = 'INSERT'"), () => cb({ NEW: newRef })) },
+      whenUpdate(cb) { db.if(sql.raw("TG_OP = 'UPDATE'"), () => cb({ NEW: newRef, OLD: oldRef })) },
+      whenDelete(cb) { db.if(sql.raw("TG_OP = 'DELETE'"), () => cb({ OLD: oldRef })) },
+    })
+  }
+}
 
 /** Options for defineRowTrigger — table is a separate first arg for schema-based type inference. */
 export interface RowTriggerOptions<TEvents extends readonly TriggerEvent[] = readonly TriggerEvent[]> {
@@ -190,7 +364,7 @@ export interface RowTriggerOptions<TEvents extends readonly TriggerEvent[] = rea
  *
  * With `as const` on events: NEW available for INSERT/UPDATE, OLD for UPDATE/DELETE.
  */
-export function defineRowTrigger<TSchema extends Record<string, unknown>>() {
+export function defineRowTrigger<TSchema extends Record<string, Record<string, unknown>>>() {
   return function <
     TTable extends keyof TSchema & string,
     TTables extends TempTableDef[] = [],
@@ -200,19 +374,13 @@ export function defineRowTrigger<TSchema extends Record<string, unknown>>() {
     options: RowTriggerOptions<TEvents>,
     tempTables: TTables,
     vars: VarDecls,
-    body: (
-      ctx: { sql: typeof sql; db: DbContext<TempTableAliasMap<TTables>> } & RowRefs<TSchema[TTable], TEvents>,
-    ) => void,
+    body: (ctx: RowBodyContext<TSchema[TTable], TSchema, TTables>) => void,
   ): TriggerDefinition {
-    const proc = defineProcedure(
+    const proc = defineProcedure<TSchema, TTables>(
       { name: options.procedureName },
       tempTables,
       vars,
-      ({ sql: s, db }) => {
-        const NEW = makeTypedRowRef<TSchema[TTable]>('NEW')
-        const OLD = makeTypedRowRef<TSchema[TTable]>('OLD')
-        body({ sql: s, db, NEW, OLD } as Parameters<typeof body>[0])
-      },
+      makeRowBodyCallback(body, makeTypedRowRef<TSchema[TTable]>('NEW'), makeTypedRowRef<TSchema[TTable]>('OLD')),
     )
     return defineTrigger(
       {
@@ -249,7 +417,89 @@ export function defineRowTrigger<TSchema extends Record<string, unknown>>() {
  * }, proc)
  * ```
  */
-export function defineRowProcedure<TSchema extends Record<string, unknown>>() {
+/**
+ * Options for defineRowProcedure.
+ * `events` is optional — used only for TypeScript typing of NEW/OLD availability.
+ * The actual trigger events are set when `defineTrigger` is called.
+ */
+export interface RowProcedureOptions<TEvents extends readonly TriggerEvent[] = readonly TriggerEvent[]>
+  extends ProcedureOptions {
+  /**
+   * Pass `as const` to constrain NEW/OLD availability in the body:
+   * - INSERT or UPDATE → NEW is available
+   * - UPDATE or DELETE → OLD is available
+   * When omitted, both NEW and OLD are available (safe default for reusable procs).
+   */
+  events?: TEvents
+}
+
+// ---------------------------------------------------------------------------
+// defineStatementProcedure
+// ---------------------------------------------------------------------------
+
+/**
+ * 2-step variant of `defineStatementTrigger`: define only the PL/pgSQL function
+ * body with typed transition tables, then attach it with `defineTrigger`.
+ *
+ * The `referencing` field is used **only for TypeScript typing** — it adds the
+ * transition table names to `ExtendedDB` so `db.selectFrom('inserted')` is
+ * type-checked as `DB[table]`. The SQL function itself carries no REFERENCING
+ * clause; that belongs to the `defineTrigger` call.
+ *
+ * ```ts
+ * const auditProc = defineStatementProcedure<DB>()(
+ *   'items',
+ *   { name: 'fn_audit', referencing: { old: 'removed', new: 'inserted' } },
+ *   [changedRows], {},
+ *   ({ db }) => {
+ *     db.selectFrom('inserted')  // typed as DB['items'] ✓
+ *     db.cr.insertFrom(...)
+ *   },
+ * )
+ *
+ * const trigger = defineTrigger({
+ *   name: 'trg_audit', table: 'items', timing: 'AFTER', events: ['UPDATE'],
+ *   forEach: 'STATEMENT', referencing: { old: 'removed', new: 'inserted' },
+ * }, auditProc)
+ * ```
+ */
+export function defineStatementProcedure<TSchema extends Record<string, Record<string, unknown>>>() {
+  return function <
+    TTable extends keyof TSchema & string,
+    TTables extends TempTableDef[] = [],
+    TRefNew extends string = never,
+    TRefOld extends string = never,
+  >(
+    _table: TTable,   // used only for type inference — not emitted in SQL
+    options: ProcedureOptions & {
+      /** Names used in the REFERENCING clause — typed only, not in the SQL function. */
+      referencing?: { new?: TRefNew; old?: TRefOld }
+    },
+    tempTables: TTables,
+    vars: VarDecls,
+    body: (ctx: {
+      sql: typeof sql
+      db: DbContext<
+        WithTransitionTables<TSchema, TTable, TRefNew, TRefOld>,
+        TTables,
+        TempTableAliasMap<TTables>
+      >
+    }) => void,
+  ): ProcedureDefinition {
+    return defineProcedure<WithTransitionTables<TSchema, TTable, TRefNew, TRefOld>, TTables>(
+      options,
+      tempTables,
+      vars,
+      body,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// defineRowProcedure
+// ---------------------------------------------------------------------------
+
+export function defineRowProcedure<TSchema extends Record<string, Record<string, unknown>>>() {
   return function <
     TTable extends keyof TSchema & string,
     TTables extends TempTableDef[] = [],
@@ -258,22 +508,13 @@ export function defineRowProcedure<TSchema extends Record<string, unknown>>() {
     options: ProcedureOptions,
     tempTables: TTables,
     vars: VarDecls,
-    body: (ctx: {
-      sql: typeof sql
-      db: DbContext<TempTableAliasMap<TTables>>
-      NEW: TypedRowRef<TSchema[TTable]>
-      OLD: TypedRowRef<TSchema[TTable]>
-    }) => void,
+    body: (ctx: RowBodyContext<TSchema[TTable], TSchema, TTables>) => void,
   ): ProcedureDefinition {
-    return defineProcedure(
+    return defineProcedure<TSchema, TTables>(
       options,
       tempTables,
       vars,
-      ({ sql: s, db }) => {
-        const NEW = makeTypedRowRef<TSchema[TTable]>('NEW')
-        const OLD = makeTypedRowRef<TSchema[TTable]>('OLD')
-        body({ sql: s, db, NEW, OLD })
-      },
+      makeRowBodyCallback(body, makeTypedRowRef<TSchema[TTable]>('NEW'), makeTypedRowRef<TSchema[TTable]>('OLD')),
     )
   }
 }
