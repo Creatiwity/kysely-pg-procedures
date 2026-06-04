@@ -1,11 +1,11 @@
 import type { SqlFragment, Statement, RaiseLevel, VarDecls } from './types.js'
 import type { TempTableDef } from './types.js'
 import { sql } from './sql.js'
-import { compileDb, isCompilable, toSqlFragment, extractFromClause } from './kysely-compile.js'
+import { compileDb, isCompilable, toSqlFragment, extractFromClause, isKyselyExpression, expressionToFragment } from './kysely-compile.js'
 import type { Compilable } from './kysely-compile.js'
 import { buildTempTableAliasMap } from './tempTable.js'
 import type { TempTableHelper, TempTableAliasMap, TempTableDbExt } from './tempTable.js'
-import type { Kysely, SelectQueryBuilder } from 'kysely'
+import type { Expression, Kysely, SelectQueryBuilder } from 'kysely'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -133,7 +133,8 @@ export type DbContext<
   readonly var: Record<string, ColumnRef>
 
   /** Assign: target := value; */
-  set(target: ColumnRef | SqlFragment | string, value: SqlFragment | Compilable | string | number): void
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  set(target: ColumnRef | SqlFragment | string, value: SqlFragment | Compilable | Expression<any> | string | number): void
 
   /** IF … THEN … [ELSE …] END IF */
   if(condition: IfCondition, thenCb: () => void, elseCb?: () => void): void
@@ -164,7 +165,8 @@ export type DbContext<
   execute(query: SqlFragment | Compilable, opts?: { label?: string }): void
 
   /** RETURN [value]; pass db.NEW or db.OLD to return the trigger row */
-  return(value?: SqlFragment | ColumnRef | RowProxy | Compilable | string | number): void
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return(value?: SqlFragment | ColumnRef | RowProxy | Compilable | Expression<any> | string | number): void
 
   /** RAISE level 'msg' [, args] [USING ERRCODE=..., HINT=..., DETAIL=...] */
   raise(level: RaiseLevel, message: string, opts?: {
@@ -276,12 +278,16 @@ function conditionToFragment(condition: IfCondition): SqlFragment {
   return condition as SqlFragment
 }
 
-function valueToFragment(value: SqlFragment | Compilable | string | number): SqlFragment {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function valueToFragment(value: SqlFragment | Compilable | Expression<any> | string | number): SqlFragment {
   if (typeof value === 'object' && value !== null && '_tag' in value) {
     return value as SqlFragment
   }
   if (isCompilable(value)) {
     return toSqlFragment(value)
+  }
+  if (isKyselyExpression(value)) {
+    return expressionToFragment(value)
   }
   if (typeof value === 'string') {
     return sql.raw(`'${value.replace(/'/g, "''")}'`)
@@ -341,7 +347,14 @@ function wrapSelectBuilder(
     get(target, prop: string | symbol) {
       if (prop === 'into') {
         return (vars: Record<string, SqlFragment>, opts?: { strict?: boolean }) => {
-          const fromClause = extractFromClause(target)
+          // If extractFromClause throws (no SELECT clause on the builder), retry with selectAll()
+          let fromClause: SqlFragment
+          try {
+            fromClause = extractFromClause(target)
+          } catch {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            fromClause = extractFromClause((target as any).selectAll())
+          }
           push({ kind: 'selectInto', vars, from: fromClause, strict: opts?.strict })
         }
       }
@@ -507,11 +520,13 @@ export function buildDbContext<
       push({ kind: 'raw', sql: toSqlFragment(query), label: opts?.label })
     },
 
-    return(value?: SqlFragment | ColumnRef | Compilable | string | number): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return(value?: SqlFragment | ColumnRef | Compilable | Expression<any> | string | number): void {
       if (value === undefined) {
         push({ kind: 'return' })
       } else {
-        push({ kind: 'return', value: valueToFragment(value as SqlFragment | Compilable | string | number) })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        push({ kind: 'return', value: valueToFragment(value as SqlFragment | Compilable | Expression<any> | string | number) })
       }
     },
 

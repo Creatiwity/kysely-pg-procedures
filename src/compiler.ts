@@ -398,7 +398,7 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
       const strict = stmt.strict ? ' STRICT' : ''
       const selectList = Object.values(stmt.vars).map(frag).join(', ')
       const intoVars = Object.keys(stmt.vars).join(', ')
-      const stmtSql = `${i}SELECT ${selectList}\n${i}INTO${strict} ${intoVars}\n${i}${frag(stmt.from)};`
+      const stmtSql = `${i}SELECT ${selectList}\n${i}INTO${strict} ${intoVars}\n${i}FROM ${frag(stmt.from)};`
       if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
         const idx = ctx.stepCounter.value++
         return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`

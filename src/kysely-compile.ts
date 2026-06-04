@@ -6,7 +6,7 @@ import {
   PostgresQueryCompiler,
   createQueryId,
 } from 'kysely'
-import type { RootOperationNode } from 'kysely'
+import type { RootOperationNode, Expression } from 'kysely'
 import type { SqlFragment } from './types.js'
 
 /**
@@ -57,7 +57,7 @@ function formatPgLiteral(value: unknown): string {
 }
 
 /** Substitute $1, $2, … placeholders back into the SQL string as inlined literals. */
-function inlineParameters(sqlText: string, parameters: readonly unknown[]): string {
+export function inlineParameters(sqlText: string, parameters: readonly unknown[]): string {
   return sqlText.replace(/\$(\d+)/g, (_, idx: string) => {
     const val = parameters[Number(idx) - 1]
     return formatPgLiteral(val)
@@ -116,4 +116,37 @@ export function compileNode(node: RootOperationNode): { sql: string; parameters:
   // createQueryId() generates a fresh UUID — required by compileQuery signature
   // but only used for query correlation, not for the SQL output itself
   return new PostgresQueryCompiler().compileQuery(node, createQueryId())
+}
+
+/**
+ * Returns true when v is a Kysely Expression (has expressionType phantom + toOperationNode()).
+ * These are returned by jsonBuildObject(), eb helpers, etc. — they are NOT Compilable
+ * (no standalone .compile() method) and require special handling.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function isKyselyExpression(v: unknown): v is Expression<any> {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'expressionType' in v &&
+    typeof (v as { toOperationNode?: unknown }).toOperationNode === 'function'
+  )
+}
+
+/**
+ * Compiles a Kysely Expression (jsonBuildObject, eb helpers, …) to a SqlFragment
+ * by wrapping it in a minimal SelectQueryNode and stripping the leading "select ".
+ * Parameters ($1, $2, …) are inlined as PostgreSQL literals.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function expressionToFragment(expr: Expression<any>): SqlFragment {
+  const exprNode = expr.toOperationNode()
+  const compiled = compileNode({
+    kind: 'SelectQueryNode',
+    selections: [{ kind: 'SelectionNode', selection: exprNode }],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any)
+  // Strip leading "select " to get just the expression SQL
+  const exprSql = compiled.sql.replace(/^select\s+/i, '').trim()
+  return { _tag: 'sql', text: inlineParameters(exprSql, compiled.parameters) }
 }
