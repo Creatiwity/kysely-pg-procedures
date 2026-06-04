@@ -174,5 +174,23 @@ function buildDropSql(def: CompiledDef): string {
     const policyName = def.name.slice('policy:'.length)
     return `DROP POLICY IF EXISTS "${policyName}" ON "${table}";`
   }
-  return `DROP FUNCTION IF EXISTS ${def.name}();`
+  const argTypes = extractArgTypes(def.sql)
+  return `DROP FUNCTION IF EXISTS ${def.name}(${argTypes});`
+}
+
+function extractArgTypes(sql: string): string {
+  // Match the opening paren of the function signature
+  const match = /CREATE OR REPLACE FUNCTION\s+\S+\s*\(([^)]*)\)/i.exec(sql)
+  if (!match || !match[1]?.trim()) return ''
+  // Each arg is: [MODE] name type [DEFAULT expr]
+  // We only want the type (third token if mode present, second otherwise)
+  const args = match[1].split(',').map((arg) => arg.trim()).filter(Boolean)
+  const types = args.map((arg) => {
+    const tokens = arg.split(/\s+/)
+    const modes = ['IN', 'OUT', 'INOUT', 'VARIADIC']
+    const startIdx = modes.includes(tokens[0]?.toUpperCase() ?? '') ? 1 : 0
+    // name is at startIdx, type is at startIdx+1
+    return tokens.slice(startIdx + 1).join(' ').split(/\s+DEFAULT\s+/i)[0] ?? ''
+  }).filter(Boolean)
+  return types.join(', ')
 }

@@ -43,7 +43,7 @@ export type TriggerForEach = 'ROW' | 'STATEMENT'
 export type Volatility = 'VOLATILE' | 'STABLE' | 'IMMUTABLE'
 export type SecurityMode = 'INVOKER' | 'DEFINER'
 
-export type VarDecl = ColumnType | { type: ColumnType; default?: string }
+export type VarDecl = ColumnType | { type: ColumnType; default?: string } | { raw: string; default?: string }
 export type VarDecls = Record<string, VarDecl>
 
 export type CatchHandler = { when: string | string[]; then: Statement[] }

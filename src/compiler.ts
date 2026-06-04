@@ -75,9 +75,19 @@ function collectVars(stmts: Statement[]): Map<string, string> {
   for (const stmt of stmts) {
     if (stmt.kind === 'vars') {
       for (const [name, decl] of Object.entries(stmt.decls)) {
-        const type = typeof decl === 'string' ? decl : decl.type
-        const defaultVal = typeof decl === 'object' && decl.default ? ` := ${decl.default}` : ''
-        vars.set(name, `${pgType(type)}${defaultVal}`)
+        let typeStr: string
+        let defaultVal: string
+        if (typeof decl === 'string') {
+          typeStr = pgType(decl)
+          defaultVal = ''
+        } else if ('raw' in decl) {
+          typeStr = decl.raw
+          defaultVal = decl.default ? ` := ${decl.default}` : ''
+        } else {
+          typeStr = pgType(decl.type)
+          defaultVal = decl.default ? ` := ${decl.default}` : ''
+        }
+        vars.set(name, `${typeStr}${defaultVal}`)
       }
     }
     for (const [k, v] of collectVars(childStatements(stmt))) {
@@ -641,11 +651,26 @@ export function compileProcedure(def: ProcedureDefinition, opts?: CompileOpts): 
   if (def.security === 'DEFINER') {
     modifiers.push('SECURITY DEFINER')
   }
+  // Fix #2: SET clauses
+  const setClauses = def.set
+    ? Object.entries(def.set).map(([k, v]) => `SET ${k} = ${v}`)
+    : []
 
-  const modStr = modifiers.length ? `\n${modifiers.join('\n')}` : ''
+  const modStr = [...modifiers, ...setClauses].length
+    ? `\n${[...modifiers, ...setClauses].join('\n')}`
+    : ''
+
+  // Fix #1: arg list in signature
+  const argList = (def.args ?? [])
+    .map((a) => {
+      const mode = a.mode && a.mode !== 'IN' ? `${a.mode} ` : ''
+      const dflt = a.default ? ` DEFAULT ${a.default}` : ''
+      return `${mode}${a.name} ${a.type}${dflt}`
+    })
+    .join(', ')
 
   return (
-    `CREATE OR REPLACE FUNCTION ${def.name}()\n` +
+    `CREATE OR REPLACE FUNCTION ${def.name}(${argList})\n` +
     `RETURNS ${def.returns}\n` +
     `LANGUAGE ${def.language}${modStr}\n` +
     `AS $$\n${funcBody}\n$$;`

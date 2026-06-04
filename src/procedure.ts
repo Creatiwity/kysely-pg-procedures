@@ -26,12 +26,23 @@ export type ProcedureCallback<
   db: DbContext<TDB, TTables, TempTableAliasMap<TTables>>
 }) => void
 
+export type ArgMode = 'IN' | 'OUT' | 'INOUT' | 'VARIADIC'
+
+export interface ProcArg {
+  name: string
+  type: string
+  mode?: ArgMode
+  default?: string
+}
+
 export interface ProcedureOptions {
   name: string
+  args?: ProcArg[]
   language?: string
   returns?: string
   volatility?: Volatility
   security?: SecurityMode
+  set?: Record<string, string>
 }
 
 export interface TriggerOptions {
@@ -48,10 +59,12 @@ export interface TriggerOptions {
 export interface ProcedureDefinition {
   readonly _tag: 'Procedure'
   readonly name: string
+  readonly args: ProcArg[]
   readonly language: string
   readonly returns: string
   readonly volatility?: Volatility
   readonly security?: SecurityMode
+  readonly set?: Record<string, string>
   readonly tempTables: TempTableDef[]
   readonly vars: VarDecls
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,10 +100,12 @@ export function defineProcedure<
   return {
     _tag: 'Procedure',
     name: options.name,
+    args: options.args ?? [],
     language: options.language ?? 'plpgsql',
     returns: options.returns ?? 'TRIGGER',
     volatility: options.volatility,
     security: options.security,
+    set: options.set,
     tempTables,
     vars,
     body,
