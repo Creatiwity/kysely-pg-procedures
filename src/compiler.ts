@@ -70,7 +70,7 @@ function createTempTable(table: TempTableDef): string {
   return `${IND}CREATE TEMP TABLE IF NOT EXISTS "${table.name}" (\n${colBlock}\n${IND});`
 }
 
-function collectVars(stmts: Statement[]): Map<string, string> {
+function collectVars(stmts: Statement[], onWarn?: (msg: string) => void): Map<string, string> {
   const vars = new Map<string, string>()
   for (const stmt of stmts) {
     if (stmt.kind === 'vars') {
@@ -81,6 +81,7 @@ function collectVars(stmts: Statement[]): Map<string, string> {
           typeStr = pgType(decl)
           defaultVal = ''
         } else if ('raw' in decl) {
+          onWarn?.(`raw var '${name}': type '${decl.raw}' is not type-checked by KPP`)
           typeStr = decl.raw
           defaultVal = decl.default ? ` := ${decl.default}` : ''
         } else {
@@ -90,7 +91,7 @@ function collectVars(stmts: Statement[]): Map<string, string> {
         vars.set(name, `${typeStr}${defaultVal}`)
       }
     }
-    for (const [k, v] of collectVars(childStatements(stmt))) {
+    for (const [k, v] of collectVars(childStatements(stmt), onWarn)) {
       if (!vars.has(k)) {
         vars.set(k, v)
       }
@@ -136,6 +137,8 @@ export interface CompileOpts {
   debug?: boolean
   log?: 'none' | 'info' | 'step' | 'debug'
   logTarget?: 'table' | 'notify'
+  /** Called when a raw escape hatch is used (rawBody, raw var type). Use console.warn in CLI contexts. */
+  onWarn?: (msg: string) => void
 }
 
 interface StmtCtx {
@@ -527,12 +530,61 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
 }
 
 export function compileProcedure(def: ProcedureDefinition, opts?: CompileOpts): string {
+  // Per-procedure warn helper — prefixes the function name for context
+  const warn = opts?.onWarn
+    ? (msg: string) => opts.onWarn!(`[KPP] ${def.name}: ${msg}`)
+    : undefined
+
+  // rawBody short-circuit: emit the body verbatim, no BEGIN/END or DECLARE synthesis
+  if (def.rawBody != null) {
+    warn?.(`rawBody — body bypasses KPP type checking`)
+
+    const argList = (def.args ?? [])
+      .map((a) => {
+        const mode = a.mode && a.mode !== 'IN' ? `${a.mode} ` : ''
+        const dflt = a.default ? ` DEFAULT ${a.default}` : ''
+        return `${mode}${a.name} ${a.type}${dflt}`
+      })
+      .join(', ')
+
+    const modifiers: string[] = []
+    if (def.volatility) modifiers.push(def.volatility)
+    if (def.security === 'DEFINER') modifiers.push('SECURITY DEFINER')
+    const setClauses = def.set
+      ? Object.entries(def.set).map(([k, v]) => `SET ${k} = ${v}`)
+      : []
+    const modStr = [...modifiers, ...setClauses].length
+      ? `\n${[...modifiers, ...setClauses].join('\n')}`
+      : ''
+
+    // Dollar-quote collision detection
+    const preferredTag = def.bodyTag ?? '$$'
+    let tag = preferredTag
+    if (def.rawBody.includes(tag)) {
+      tag = '$kpp$'
+      let i = 1
+      while (def.rawBody.includes(tag)) {
+        tag = `$kpp${i}$`
+        i++
+      }
+    }
+
+    return (
+      `CREATE OR REPLACE FUNCTION ${def.name}(${argList})\n` +
+      `RETURNS ${def.returns}\n` +
+      `LANGUAGE ${def.language}${modStr}\n` +
+      `AS ${tag}\n${def.rawBody}\n${tag};`
+    )
+  }
+
+  // --- existing code continues below ---
+
   const stmts = executeBody(def)
   const logLevel = opts?.log ?? 'none'
   const logTarget = opts?.logTarget ?? 'table'
   const effectiveDebug = (opts?.debug ?? false) || logLevel === 'debug'
 
-  const declVars = collectVars(stmts)
+  const declVars = collectVars(stmts, warn)
 
   // _proc_instance_id is needed for temp table isolation AND as execution_id in logs
   if (def.tempTables.length > 0 || logLevel !== 'none') {

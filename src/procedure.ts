@@ -43,6 +43,11 @@ export interface ProcedureOptions {
   volatility?: Volatility
   security?: SecurityMode
   set?: Record<string, string>
+  /** Emit this string verbatim as the function body. Bypasses BEGIN/END synthesis,
+   *  DECLARE, temp-table injection, and the typed DSL callback. Works for any language. */
+  rawBody?: string
+  /** Dollar-quote tag. Defaults to '$$'; compiler picks a non-colliding tag if needed. */
+  bodyTag?: string
 }
 
 export interface TriggerOptions {
@@ -65,6 +70,8 @@ export interface ProcedureDefinition {
   readonly volatility?: Volatility
   readonly security?: SecurityMode
   readonly set?: Record<string, string>
+  readonly rawBody?: string
+  readonly bodyTag?: string
   readonly tempTables: TempTableDef[]
   readonly vars: VarDecls
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -106,6 +113,8 @@ export function defineProcedure<
     volatility: options.volatility,
     security: options.security,
     set: options.set,
+    rawBody: options.rawBody,
+    bodyTag: options.bodyTag,
     tempTables,
     vars,
     body,
