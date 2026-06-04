@@ -45,12 +45,30 @@ export function isCompilable(v: unknown): v is Compilable {
   )
 }
 
+/** Format a single JS value as a PostgreSQL literal for inline embedding. */
+function formatPgLiteral(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL'
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`
+  if (Array.isArray(value)) return `ARRAY[${value.map(formatPgLiteral).join(', ')}]`
+  // Date, Buffer, etc. — safe fallback
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+/** Substitute $1, $2, … placeholders back into the SQL string as inlined literals. */
+function inlineParameters(sqlText: string, parameters: readonly unknown[]): string {
+  return sqlText.replace(/\$(\d+)/g, (_, idx: string) => {
+    const val = parameters[Number(idx) - 1]
+    return formatPgLiteral(val)
+  })
+}
+
 /**
  * Converts a SqlFragment or a Compilable into a SqlFragment.
  *
- * For Compilable inputs the query is compiled and its `.sql` string is used
- * directly. Throws if the compiled query contains bound parameters — parameter
- * placeholders ($1, $2, …) cannot be embedded verbatim into PL/pgSQL source.
+ * For Compilable inputs the query is compiled and parameters are inlined as
+ * PostgreSQL literals so the result can be embedded verbatim into PL/pgSQL source.
  */
 export function toSqlFragment(query: SqlFragment | Compilable): SqlFragment {
   if (typeof query === 'object' && query !== null && '_tag' in query && query._tag === 'sql') {
@@ -59,15 +77,7 @@ export function toSqlFragment(query: SqlFragment | Compilable): SqlFragment {
 
   const compiled = (query as Compilable).compile()
 
-  if (compiled.parameters.length > 0) {
-    throw new Error(
-      `toSqlFragment: compiled query contains ${compiled.parameters.length} bound parameter(s). ` +
-        'Parameterised queries cannot be embedded as SQL fragments. ' +
-        'Use sql.raw() or inline the values directly.',
-    )
-  }
-
-  return { _tag: 'sql', text: compiled.sql }
+  return { _tag: 'sql', text: inlineParameters(compiled.sql, compiled.parameters) }
 }
 
 /**
@@ -78,26 +88,18 @@ export function toSqlFragment(query: SqlFragment | Compilable): SqlFragment {
  * `FOR row IN SELECT ... FROM ... LOOP` or a `SELECT INTO` source without
  * re-expressing the table / join logic as a raw string.
  *
- * Throws if the compiled query contains bound parameters (same reason as
- * toSqlFragment), or if the SQL does not contain a recognisable "from" keyword.
+ * Throws if the SQL does not contain a recognisable "from" keyword. Parameters
+ * are inlined as PostgreSQL literals before extraction.
  */
 export function extractFromClause(query: Compilable): SqlFragment {
   const compiled = query.compile()
 
-  if (compiled.parameters.length > 0) {
-    throw new Error(
-      `extractFromClause: compiled query contains ${compiled.parameters.length} bound parameter(s). ` +
-        'Parameterised queries cannot be embedded as SQL fragments.',
-    )
-  }
-
-  // Match "select <projection> from <rest>" — case-insensitive, the projection
-  // may span multiple lines so we use the 's' (dotAll) flag.
-  const match = /^select\s+.+?\s+from\s+([\s\S]+)$/is.exec(compiled.sql.trim())
+  const inlinedSql = inlineParameters(compiled.sql, compiled.parameters)
+  const match = /^select\s+.+?\s+from\s+([\s\S]+)$/is.exec(inlinedSql.trim())
 
   if (!match || !match[1]) {
     throw new Error(
-      `extractFromClause: could not find a FROM clause in the compiled SQL:\n${compiled.sql}`,
+      `extractFromClause: could not find a FROM clause in the compiled SQL:\n${inlinedSql}`,
     )
   }
 

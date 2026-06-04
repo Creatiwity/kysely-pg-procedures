@@ -62,7 +62,7 @@ export type Statement =
   | { kind: 'exit'; when?: SqlFragment }
   | { kind: 'continue'; when?: SqlFragment }
   | { kind: 'return'; value?: SqlFragment }
-  | { kind: 'raise'; level: RaiseLevel; message: string; args?: SqlFragment[] }
+  | { kind: 'raise'; level: RaiseLevel; message: string; args?: SqlFragment[]; errcode?: string; hint?: string; detail?: string }
   | { kind: 'perform'; query: SqlFragment }
   | { kind: 'raw'; sql: SqlFragment; label?: string }
   | { kind: 'catch'; handlers: CatchHandler[] }

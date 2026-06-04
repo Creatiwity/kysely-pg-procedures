@@ -166,8 +166,37 @@ export type DbContext<
   /** RETURN [value]; pass db.NEW or db.OLD to return the trigger row */
   return(value?: SqlFragment | ColumnRef | RowProxy | string | number): void
 
-  /** RAISE level 'msg' [, args] */
-  raise(level: RaiseLevel, message: string, args?: Array<SqlFragment | ColumnRef>): void
+  /** RAISE level 'msg' [, args] [USING ERRCODE=..., HINT=..., DETAIL=...] */
+  raise(level: RaiseLevel, message: string, opts?: {
+    args?: Array<SqlFragment | ColumnRef>
+    errcode?: string
+    hint?: string
+    detail?: string
+  }): void
+
+  /** PL/pgSQL special variable — TRUE if last SQL statement affected ≥1 row */
+  readonly FOUND: SqlFragment
+
+  /** Plain CTE wrapper — typed against the combined schema */
+  with: Kysely<ExtendedDB<TDB, TTables>>['with']
+
+  /** FOR rowVar IN query LOOP … END LOOP */
+  forRow(rowVar: string, source: SqlFragment | Compilable, body: () => void): void
+
+  /** FOR var IN from..to LOOP … END LOOP */
+  forIn(varName: string, from: SqlFragment | number, to: SqlFragment | number, body: () => void): void
+
+  /** WHILE condition LOOP … END LOOP */
+  while(condition: IfCondition, body: () => void): void
+
+  /** LOOP … END LOOP (unconditional — use exit() to break) */
+  loop(body: () => void): void
+
+  /** EXIT [WHEN condition]; */
+  exit(when?: IfCondition): void
+
+  /** CONTINUE [WHEN condition]; */
+  continue(when?: IfCondition): void
 
   /** EXCEPTION handlers — hoisted to the EXCEPTION section by the compiler */
   catch(handlers: Record<string, () => void>): void
@@ -452,13 +481,57 @@ export function buildDbContext<
       }
     },
 
-    raise(level: RaiseLevel, message: string, args?: Array<SqlFragment | ColumnRef>): void {
+    raise(level: RaiseLevel, message: string, opts?: {
+      args?: Array<SqlFragment | ColumnRef>
+      errcode?: string
+      hint?: string
+      detail?: string
+    }): void {
       push({
         kind: 'raise',
         level,
         message,
-        args: args?.map((a) => a as SqlFragment),
+        args: opts?.args?.map((a) => a as SqlFragment),
+        errcode: opts?.errcode,
+        hint: opts?.hint,
+        detail: opts?.detail,
       })
+    },
+
+    FOUND: sql.raw('FOUND'),
+
+    with: typedDb.with.bind(typedDb),
+
+    forRow(rowVar: string, source: SqlFragment | Compilable, body: () => void): void {
+      const query = toSqlFragment(source)
+      const bodyStmts = captureBlock(body)
+      push({ kind: 'forRow', rowVar, query, body: bodyStmts })
+    },
+
+    forIn(varName: string, from: SqlFragment | number, to: SqlFragment | number, body: () => void): void {
+      const fromFrag: SqlFragment = typeof from === 'number' ? sql.raw(String(from)) : from
+      const toFrag: SqlFragment = typeof to === 'number' ? sql.raw(String(to)) : to
+      const bodyStmts = captureBlock(body)
+      push({ kind: 'forIn', var: varName, from: fromFrag, to: toFrag, body: bodyStmts })
+    },
+
+    while(condition: IfCondition, body: () => void): void {
+      const condFragment = conditionToFragment(condition)
+      const bodyStmts = captureBlock(body)
+      push({ kind: 'while', condition: condFragment, body: bodyStmts })
+    },
+
+    loop(body: () => void): void {
+      const bodyStmts = captureBlock(body)
+      push({ kind: 'loop', body: bodyStmts })
+    },
+
+    exit(when?: IfCondition): void {
+      push({ kind: 'exit', when: when ? conditionToFragment(when) : undefined })
+    },
+
+    continue(when?: IfCondition): void {
+      push({ kind: 'continue', when: when ? conditionToFragment(when) : undefined })
     },
 
     catch(handlers: Record<string, () => void>): void {

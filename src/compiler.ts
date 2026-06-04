@@ -462,7 +462,12 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
 
     case 'raise': {
       const args = stmt.args?.length ? `, ${stmt.args.map(frag).join(', ')}` : ''
-      return `${i}RAISE ${stmt.level} '${stmt.message}'${args};`
+      const using: string[] = []
+      if (stmt.errcode) using.push(`ERRCODE = '${stmt.errcode}'`)
+      if (stmt.hint) using.push(`HINT = '${stmt.hint.replace(/'/g, "''")}'`)
+      if (stmt.detail) using.push(`DETAIL = '${stmt.detail.replace(/'/g, "''")}'`)
+      const usingClause = using.length ? `\n${i}    USING ${using.join(',\n' + i + '    ')}` : ''
+      return `${i}RAISE ${stmt.level} '${stmt.message}'${args}${usingClause};`
     }
 
     case 'perform':
