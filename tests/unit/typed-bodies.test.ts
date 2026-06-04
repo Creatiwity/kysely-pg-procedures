@@ -51,7 +51,7 @@ describe('typed procedure bodies — round 3', () => {
       [],
       {},
       ({ db }) => {
-        db.forRow('r', db.selectFrom('items').selectAll(), () => {
+        db.forRow(db.selectFrom('items').selectAll(), (row) => {
           db.raise('NOTICE', 'found item')
         })
       },
@@ -59,9 +59,27 @@ describe('typed procedure bodies — round 3', () => {
 
     const output = compileProcedure(proc)
 
-    expect(output).toContain('FOR r IN')
+    expect(output).toContain('FOR _kpp_row0 IN')
     expect(output).toContain('LOOP')
     expect(output).toContain('END LOOP')
+  })
+
+  // -------------------------------------------------------------------------
+  // Test 3b: forRow yields a typed row proxy
+  // -------------------------------------------------------------------------
+  it('forRow yields a typed row proxy — column access compiles to rowVar."col"', () => {
+    const proc = defineProcedure(
+      { name: 'fn_typed_row', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.forRow(db.selectFrom('items' as any).selectAll(), (row: any) => {
+          db.raise('NOTICE', 'row id', { args: [row.id] })
+        })
+      },
+    )
+    const out = compileProcedure(proc)
+    expect(out).toMatch(/_kpp_row0."id"/)
   })
 
   // -------------------------------------------------------------------------

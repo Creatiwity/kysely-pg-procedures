@@ -33,7 +33,7 @@ export type TypedRowRef<TRow> = ColumnRef & {
 }
 
 /** @internal Create a TypedRowRef proxy for NEW or OLD. */
-export function makeTypedRowRef<TRow>(rowName: 'NEW' | 'OLD'): TypedRowRef<TRow> {
+export function makeTypedRowRef<TRow>(rowName: string): TypedRowRef<TRow> {
   const self = { _tag: 'sql' as const, text: rowName, _colName: rowName }
   return new Proxy(self as unknown as TypedRowRef<TRow>, {
     get(target, prop: string | symbol): unknown {
@@ -133,7 +133,7 @@ export type DbContext<
   readonly var: Record<string, ColumnRef>
 
   /** Assign: target := value; */
-  set(target: ColumnRef | SqlFragment | string, value: SqlFragment | string | number): void
+  set(target: ColumnRef | SqlFragment | string, value: SqlFragment | Compilable | string | number): void
 
   /** IF … THEN … [ELSE …] END IF */
   if(condition: IfCondition, thenCb: () => void, elseCb?: () => void): void
@@ -164,7 +164,7 @@ export type DbContext<
   execute(query: SqlFragment | Compilable, opts?: { label?: string }): void
 
   /** RETURN [value]; pass db.NEW or db.OLD to return the trigger row */
-  return(value?: SqlFragment | ColumnRef | RowProxy | string | number): void
+  return(value?: SqlFragment | ColumnRef | RowProxy | Compilable | string | number): void
 
   /** RAISE level 'msg' [, args] [USING ERRCODE=..., HINT=..., DETAIL=...] */
   raise(level: RaiseLevel, message: string, opts?: {
@@ -180,8 +180,9 @@ export type DbContext<
   /** Plain CTE wrapper — typed against the combined schema */
   with: Kysely<ExtendedDB<TDB, TTables>>['with']
 
-  /** FOR rowVar IN query LOOP … END LOOP */
-  forRow(rowVar: string, source: SqlFragment | Compilable, body: () => void): void
+  /** FOR _kpp_rowN IN query LOOP … END LOOP — body receives a typed row proxy */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  forRow<O extends Record<string, unknown> = Record<string, unknown>>(source: SqlFragment | Compilable, body: (row: TypedRowRef<O>) => void): void
 
   /** FOR var IN from..to LOOP … END LOOP */
   forIn(varName: string, from: SqlFragment | number, to: SqlFragment | number, body: () => void): void
@@ -275,9 +276,12 @@ function conditionToFragment(condition: IfCondition): SqlFragment {
   return condition as SqlFragment
 }
 
-function valueToFragment(value: SqlFragment | string | number): SqlFragment {
+function valueToFragment(value: SqlFragment | Compilable | string | number): SqlFragment {
   if (typeof value === 'object' && value !== null && '_tag' in value) {
     return value as SqlFragment
+  }
+  if (isCompilable(value)) {
+    return toSqlFragment(value)
   }
   if (typeof value === 'string') {
     return sql.raw(`'${value.replace(/'/g, "''")}'`)
@@ -368,6 +372,30 @@ function wrapSelectBuilder(
   }) as SelectQueryBuilder<any, any, any>
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapCteBuilder(builder: any): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new Proxy(builder, {
+    get(target: any, prop: string | symbol) {
+      // Wrap selectFrom so the returned builder has .into()
+      if (prop === 'selectFrom') {
+        return (...args: unknown[]) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return wrapSelectBuilder((target as any).selectFrom(...args))
+        }
+      }
+      // Allow chaining .with().with().selectFrom() — each intermediate also gets wrapped
+      if (prop === 'with' || prop === 'withRecursive') {
+        return (...args: unknown[]) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return wrapCteBuilder((target as any)[prop as string](...args))
+        }
+      }
+      return Reflect.get(target, prop, target)
+    },
+  })
+}
+
 // ---------------------------------------------------------------------------
 // buildDbContext
 // ---------------------------------------------------------------------------
@@ -390,6 +418,9 @@ export function buildDbContext<
   tempTables: TTables,
   vars: VarDecls,
 ): { db: DbContext<TDB, TTables, TempTableAliasMap<TTables>>; getStatements(): Statement[] } {
+  // Auto-incremented suffix for forRow loop variable names within this procedure body
+  let _forRowCounter = 0
+
   const aliasMap: Record<string, TempTableHelper> = Object.fromEntries(
     Object.entries(buildTempTableAliasMap(tempTables)).map(([k, h]) => [k, wrapHelperForPush(h)])
   )
@@ -464,7 +495,10 @@ export function buildDbContext<
       return wrapSelectBuilder(builder as unknown as SelectQueryBuilder<any, any, any>)
     },
 
-    withRecursive: typedDb.withRecursive.bind(typedDb),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    withRecursive(...args: any[]): any {
+      return wrapCteBuilder((typedDb.withRecursive as any)(...args))
+    },
     updateTable: typedDb.updateTable.bind(typedDb),
     deleteFrom: typedDb.deleteFrom.bind(typedDb),
     insertInto: typedDb.insertInto.bind(typedDb),
@@ -473,11 +507,11 @@ export function buildDbContext<
       push({ kind: 'raw', sql: toSqlFragment(query), label: opts?.label })
     },
 
-    return(value?: SqlFragment | ColumnRef | string | number): void {
+    return(value?: SqlFragment | ColumnRef | Compilable | string | number): void {
       if (value === undefined) {
         push({ kind: 'return' })
       } else {
-        push({ kind: 'return', value: valueToFragment(value as SqlFragment | string | number) })
+        push({ kind: 'return', value: valueToFragment(value as SqlFragment | Compilable | string | number) })
       }
     },
 
@@ -500,11 +534,17 @@ export function buildDbContext<
 
     FOUND: sql.raw('FOUND'),
 
-    with: typedDb.with.bind(typedDb),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    with(...args: any[]): any {
+      return wrapCteBuilder((typedDb.with as any)(...args))
+    },
 
-    forRow(rowVar: string, source: SqlFragment | Compilable, body: () => void): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    forRow<O extends Record<string, unknown> = Record<string, unknown>>(source: SqlFragment | Compilable, body: (row: TypedRowRef<O>) => void): void {
+      const rowVar = `_kpp_row${_forRowCounter++}`
       const query = toSqlFragment(source)
-      const bodyStmts = captureBlock(body)
+      const rowRef = makeTypedRowRef<O>(rowVar)
+      const bodyStmts = captureBlock(() => body(rowRef))
       push({ kind: 'forRow', rowVar, query, body: bodyStmts })
     },
 
