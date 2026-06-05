@@ -3,6 +3,19 @@ import { compileProcedure } from '../../src/compiler.js'
 import { defineProcedure } from '../../src/procedure.js'
 import { sql } from '../../src/sql.js'
 import { sql as ksql } from 'kysely'
+// jsonBuildObject is not a named export from kysely; define a local stand-in
+// that returns a real Kysely Expression (ksql tagged template) so we can test
+// that proxy ColumnRefs inside Kysely Expressions compile correctly.
+function jsonBuildObject(obj: Record<string, unknown>): ReturnType<typeof ksql> {
+  const parts: unknown[] = []
+  const keys = Object.keys(obj)
+  for (let i = 0; i < keys.length; i++) {
+    if (i > 0) parts.push(ksql.raw(', '))
+    parts.push(ksql.raw(`'${keys[i]}', `))
+    parts.push(obj[keys[i]])
+  }
+  return ksql`json_build_object(${ksql.join(Object.entries(obj).map(([k, v]) => ksql`${ksql.raw(`'${k}'`)}, ${v as any}`))})`
+}
 
 describe('typed procedure bodies — round 3', () => {
   // -------------------------------------------------------------------------
@@ -281,5 +294,86 @@ describe('typed procedure bodies — round 3', () => {
     const output = compileProcedure(proc)
 
     expect(output).not.toContain('undefined')
+  })
+
+  // -------------------------------------------------------------------------
+  // R5.1: proxy as Kysely Expression (no [object Object])
+  // -------------------------------------------------------------------------
+  it('R5.1: proxy as Kysely Expression — db.return(jsonBuildObject) contains v_n, not [object Object]', () => {
+    const proc = defineProcedure(
+      { name: 'test_proxy_expression', returns: 'void', language: 'plpgsql' },
+      [],
+      { v_n: 'integer' },
+      ({ db }) => {
+        db.return(jsonBuildObject({ n: db.var.v_n }) as any)
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).not.toContain('[object Object]')
+    expect(output).toContain('v_n')
+  })
+
+  // -------------------------------------------------------------------------
+  // R5.1: ksql template with proxy (no [object Object])
+  // -------------------------------------------------------------------------
+  it('R5.1: ksql template with proxy — db.execute(ksql`...${db.var.v_n}`) contains v_n, not [object Object]', () => {
+    const proc = defineProcedure(
+      { name: 'test_ksql_proxy', returns: 'void', language: 'plpgsql' },
+      [],
+      { v_n: 'integer' },
+      ({ db }) => {
+        db.execute(ksql`update t set x = ${db.var.v_n as any}`)
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).not.toContain('[object Object]')
+    expect(output).toContain('v_n')
+  })
+
+  // -------------------------------------------------------------------------
+  // R5.2: dmlInto from insertInto with returning
+  // -------------------------------------------------------------------------
+  it('R5.2: dmlInto — insertInto with returning compiles to INSERT INTO … INTO v_id', () => {
+    const proc = defineProcedure(
+      { name: 'test_dml_into', returns: 'void', language: 'plpgsql' },
+      [],
+      { v_id: 'integer' },
+      ({ db }) => {
+        db.insertInto('items' as any)
+          .values({ name: 'x' } as any)
+          .returning('id' as any)
+          .into({ v_id: sql.raw('id') })
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toMatch(/insert into/i)
+    expect(output).toContain('INTO v_id')
+  })
+
+  // -------------------------------------------------------------------------
+  // R5.3: intoRow on selectFrom
+  // -------------------------------------------------------------------------
+  it('R5.3: intoRow — selectFrom with where compiles to SELECT * INTO v_msg', () => {
+    const proc = defineProcedure(
+      { name: 'test_into_row', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.selectFrom('messages' as any)
+          .where('id', '=', 1 as any)
+          .intoRow('v_msg')
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toContain('SELECT *')
+    expect(output).toContain('INTO v_msg')
   })
 })

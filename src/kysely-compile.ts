@@ -52,6 +52,9 @@ function formatPgLiteral(value: unknown): string {
   if (typeof value === 'number') return String(value)
   if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`
   if (Array.isArray(value)) return `ARRAY[${value.map(formatPgLiteral).join(', ')}]`
+  if (typeof value === "object" && value !== null && "_tag" in value && (value as any)._tag === "sql" && "text" in value) {
+    return (value as any).text
+  }
   // Date, Buffer, etc. — safe fallback
   return `'${String(value).replace(/'/g, "''")}'`
 }
@@ -74,6 +77,8 @@ export function toSqlFragment(query: SqlFragment | Compilable): SqlFragment {
   if (typeof query === 'object' && query !== null && '_tag' in query && query._tag === 'sql') {
     return query as SqlFragment
   }
+
+  if (isKyselyExpression(query as unknown)) { return expressionToFragment(query as unknown as Expression<any>) }
 
   const compiled = (query as Compilable).compile()
 

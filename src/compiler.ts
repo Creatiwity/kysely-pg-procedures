@@ -214,6 +214,7 @@ function statementKindLabel(kind: string): string {
     tempInsertFrom: 'TEMPINSERTFROM',
     tempDelete: 'TEMPDELETE',
     selectInto: 'SELECTINTO',
+    dmlInto: 'DMLINTO',
   }
   return map[kind] ?? kind.toUpperCase()
 }
@@ -402,6 +403,17 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
       const selectList = Object.values(stmt.vars).map(frag).join(', ')
       const intoVars = Object.keys(stmt.vars).join(', ')
       const stmtSql = `${i}SELECT ${selectList}\n${i}INTO${strict} ${intoVars}\n${i}FROM ${frag(stmt.from)};`
+      if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
+        const idx = ctx.stepCounter.value++
+        return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
+      }
+      return stmtSql
+    }
+
+    case 'dmlInto': {
+      const strict = stmt.strict ? ' STRICT' : ''
+      const intoVars = Object.keys(stmt.vars).join(', ')
+      const stmtSql = i + frag(stmt.dml) + '\n' + i + 'INTO' + strict + ' ' + intoVars + ';'
       if (ctx && (ctx.log === 'step' || ctx.log === 'debug')) {
         const idx = ctx.stepCounter.value++
         return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`

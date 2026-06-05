@@ -69,4 +69,5 @@ export type Statement =
   | { kind: 'tempInsert'; table: TempTableDef; values: Record<string, SqlFragment>; label?: string }
   | { kind: 'tempInsertFrom'; table: TempTableDef; columns: string[]; query: SqlFragment; label?: string }
   | { kind: 'tempDelete'; table: TempTableDef; where?: SqlFragment; label?: string }
+  | { kind: 'dmlInto'; dml: SqlFragment; vars: Record<string, SqlFragment>; strict?: boolean }
   | { kind: 'snapshot'; label: string }

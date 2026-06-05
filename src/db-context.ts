@@ -15,6 +15,8 @@ import type { Expression, Kysely, SelectQueryBuilder } from 'kysely'
  * as an assignment target in db.set(). */
 export interface ColumnRef extends SqlFragment {
   readonly _colName: string
+  readonly expressionType: unknown
+  toOperationNode(): unknown
 }
 
 /**
@@ -34,11 +36,11 @@ export type TypedRowRef<TRow> = ColumnRef & {
 
 /** @internal Create a TypedRowRef proxy for NEW or OLD. */
 export function makeTypedRowRef<TRow>(rowName: string): TypedRowRef<TRow> {
-  const self = { _tag: 'sql' as const, text: rowName, _colName: rowName }
+  const self = { _tag: 'sql' as const, text: rowName, _colName: rowName, expressionType: undefined as unknown, toOperationNode: () => ({ kind: 'RawNode' as const, sqlFragments: [rowName], parameters: [] as readonly never[] }) }
   return new Proxy(self as unknown as TypedRowRef<TRow>, {
     get(target, prop: string | symbol): unknown {
       if (typeof prop !== 'string') return (target as unknown as Record<symbol, unknown>)[prop]
-      if (prop === '_tag' || prop === 'text' || prop === '_colName') {
+      if (prop === '_tag' || prop === 'text' || prop === '_colName' || prop === 'expressionType' || prop === 'toOperationNode') {
         return (target as unknown as Record<string, unknown>)[prop]
       }
       return makeColumnRef(`${rowName}."${prop}"`, prop)
@@ -100,6 +102,22 @@ declare module 'kysely' {
      */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     into(vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }): void
+    intoRow(varName: string, opts?: { strict?: boolean }): void
+  }
+  interface InsertQueryBuilder<DB, TB extends keyof DB, O> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    into(vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }): void
+    intoRow(varName: string, opts?: { strict?: boolean }): void
+  }
+  interface UpdateQueryBuilder<DB, UT extends keyof DB, TB extends keyof DB, O> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    into(vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }): void
+    intoRow(varName: string, opts?: { strict?: boolean }): void
+  }
+  interface DeleteQueryBuilder<DB, TB extends keyof DB, O> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    into(vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }): void
+    intoRow(varName: string, opts?: { strict?: boolean }): void
   }
 }
 
@@ -257,7 +275,7 @@ function push(stmt: Statement): void {
 // ---------------------------------------------------------------------------
 
 function makeColumnRef(text: string, colName: string): ColumnRef {
-  return { _tag: 'sql', text, _colName: colName }
+  return { _tag: 'sql', text, _colName: colName, expressionType: undefined as unknown, toOperationNode: () => ({ kind: 'RawNode' as const, sqlFragments: [text], parameters: [] as readonly never[] }) }
 }
 
 function isColumnRef(v: unknown): v is ColumnRef {
@@ -307,11 +325,11 @@ function valueToFragment(value: SqlFragment | Compilable | Expression<any> | str
 function makeRowProxy(rowName: 'NEW' | 'OLD'): RowProxy {
   // The target carries _tag/text/_colName so that db.NEW itself satisfies
   // RowProxy (and therefore SqlFragment) when passed to db.return(db.NEW).
-  const self = { _tag: 'sql' as const, text: rowName, _colName: rowName }
+  const self = { _tag: 'sql' as const, text: rowName, _colName: rowName, expressionType: undefined as unknown, toOperationNode: () => ({ kind: 'RawNode' as const, sqlFragments: [rowName], parameters: [] as readonly never[] }) }
   return new Proxy(self as unknown as RowProxy, {
     get(target, prop: string | symbol): unknown {
       if (typeof prop !== 'string') return (target as unknown as Record<symbol, unknown>)[prop]
-      if (prop === '_tag' || prop === 'text' || prop === '_colName') return (target as unknown as Record<string, unknown>)[prop]
+      if (prop === '_tag' || prop === 'text' || prop === '_colName' || prop === 'expressionType' || prop === 'toOperationNode') return (target as unknown as Record<string, unknown>)[prop]
       return makeColumnRef(`${rowName}."${prop}"`, prop)
     },
   })
@@ -369,6 +387,19 @@ function wrapSelectBuilder(
         }
       }
 
+      if (prop === 'intoRow') {
+        return (varName: string, opts?: { strict?: boolean }) => {
+          let fromClause: SqlFragment
+          try {
+            fromClause = extractFromClause(target)
+          } catch {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            fromClause = extractFromClause((target as any).selectAll())
+          }
+          push({ kind: 'selectInto', vars: { [varName]: sql.raw('*') }, from: fromClause, strict: opts?.strict })
+        }
+      }
+
       const val = Reflect.get(target, prop, target)
       if (typeof val !== 'function') return val
 
@@ -393,6 +424,51 @@ function wrapSelectBuilder(
     },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as SelectQueryBuilder<any, any, any>
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapDmlBuilder(target: any, opts?: { strict?: boolean }): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new Proxy(target, {
+    get(inner: any, prop: string | symbol) {
+      if (prop === 'into') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (vars: Record<string, SqlFragment | Expression<any>>, iopts?: { strict?: boolean }) => {
+          const compiledSql = toSqlFragment(inner)
+          const resolvedVars: Record<string, SqlFragment> = {}
+          for (const [k, v] of Object.entries(vars)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            resolvedVars[k] = valueToFragment(v as any)
+          }
+          push({ kind: 'dmlInto', dml: compiledSql, vars: resolvedVars, strict: iopts?.strict ?? opts?.strict })
+        }
+      }
+
+      if (prop === 'intoRow') {
+        return (varName: string, iopts?: { strict?: boolean }) => {
+          const compiledSql = toSqlFragment(inner)
+          push({ kind: 'dmlInto', dml: compiledSql, vars: { [varName]: sql.raw('*') }, strict: iopts?.strict ?? opts?.strict })
+        }
+      }
+
+      const val = Reflect.get(inner, prop, inner)
+      if (typeof val !== 'function') return val
+
+      return (...args: unknown[]) => {
+        const result = (val as (...a: unknown[]) => unknown).apply(inner, args)
+        // Re-wrap if the result is a DML builder (has .compile)
+        if (
+          result !== null &&
+          typeof result === 'object' &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          typeof (result as any).compile === 'function'
+        ) {
+          return wrapDmlBuilder(result, opts)
+        }
+        return result
+      }
+    },
+  })
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -522,9 +598,12 @@ export function buildDbContext<
     withRecursive(...args: any[]): any {
       return wrapCteBuilder((typedDb.withRecursive as any)(...args))
     },
-    updateTable: typedDb.updateTable.bind(typedDb),
-    deleteFrom: typedDb.deleteFrom.bind(typedDb),
-    insertInto: typedDb.insertInto.bind(typedDb),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    insertInto(from: any): any { return wrapDmlBuilder(typedDb.insertInto(from as any)) },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    updateTable(from: any): any { return wrapDmlBuilder(typedDb.updateTable(from as any)) },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    deleteFrom(from: any): any { return wrapDmlBuilder(typedDb.deleteFrom(from as any)) },
 
     execute(query: SqlFragment | Compilable, opts?: { label?: string }): void {
       push({ kind: 'raw', sql: toSqlFragment(query), label: opts?.label })
