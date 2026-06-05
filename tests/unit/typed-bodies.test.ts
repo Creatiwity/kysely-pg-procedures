@@ -376,4 +376,110 @@ describe('typed procedure bodies — round 3', () => {
     expect(output).toContain('SELECT *')
     expect(output).toContain('INTO v_msg')
   })
+
+  // -------------------------------------------------------------------------
+  // R6.1: returnQuery emits RETURN QUERY with the full query text
+  // -------------------------------------------------------------------------
+  it('R6.1: returnQuery — emits RETURN QUERY and references the table', () => {
+    const proc = defineProcedure(
+      { name: 'test_return_query', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.returnQuery(db.selectFrom('profiles' as any).selectAll())
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toMatch(/RETURN QUERY/i)
+    expect(output).toContain('profiles')
+  })
+
+  // -------------------------------------------------------------------------
+  // R6.2: intoRecord preserves explicit column list, not SELECT *
+  // -------------------------------------------------------------------------
+  it('R6.2: intoRecord — emits INTO v_conv and preserves explicit column list', () => {
+    const proc = defineProcedure(
+      { name: 'test_into_record', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.selectFrom('conversations as c' as any)
+          .select(['c.kind' as any])
+          .where('c.id', '=', 1 as any)
+          .intoRecord('v_conv')
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toContain('INTO v_conv')
+    expect(output).not.toContain('SELECT *')
+  })
+
+  // -------------------------------------------------------------------------
+  // R6.3: named forRow uses supplied variable name, not auto-generated one
+  // -------------------------------------------------------------------------
+  it('R6.3: named forRow — emits FOR v_member IN and does not use _kpp_row', () => {
+    const proc = defineProcedure(
+      { name: 'test_named_for_row', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.forRow('v_member', db.selectFrom('members' as any).selectAll(), (_row: any) => {
+          db.raise('NOTICE', 'ok')
+        })
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toContain('FOR v_member IN')
+    expect(output).not.toContain('_kpp_row')
+  })
+
+  // -------------------------------------------------------------------------
+  // R6.3: forEach emits FOREACH … IN ARRAY … LOOP
+  // -------------------------------------------------------------------------
+  it('R6.3: forEach — emits FOREACH v_opt IN ARRAY v_options LOOP', () => {
+    const proc = defineProcedure(
+      { name: 'test_foreach', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.forEach('v_opt', sql.raw('v_options'), () => {
+          db.raise('NOTICE', 'tick')
+        })
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toContain('FOREACH v_opt IN ARRAY v_options LOOP')
+  })
+
+  // -------------------------------------------------------------------------
+  // R6.4: intoRow with subquery in WHERE — outer FROM is preserved
+  // -------------------------------------------------------------------------
+  it('R6.4: intoRow with subquery in WHERE — outer table is messages, INTO v_msg', () => {
+    const proc = defineProcedure(
+      { name: 'test_into_row_subquery', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.selectFrom('messages as m' as any)
+          .where(ksql`m.id > 0 AND NOT EXISTS (SELECT 1 FROM deleted d WHERE d.msg_id = m.id)` as any)
+          .intoRow('v_msg')
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toMatch(/FROM "messages"/)
+    expect(output).toContain('INTO v_msg')
+    // The primary FROM (outer table) must not be 'deleted'
+    const afterInto = output.slice(output.indexOf('INTO v_msg'))
+    expect(afterInto).not.toMatch(/^\s*FROM deleted/m)
+  })
 })

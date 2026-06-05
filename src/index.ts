@@ -51,7 +51,7 @@ export type { ProcLogEntry, ProcLogStep } from './notify-listener.js'
 export { createOtelProcSpanEmitter, KyselyOtelPlugin } from './otel.js'
 export type { OtelProcSpanEmitterOpts, KyselyOtelPluginOpts } from './otel.js'
 
-export { compileDb, toSqlFragment, extractFromClause, isCompilable } from './kysely-compile.js'
+export { compileDb, toSqlFragment, extractFromClause, extractSelectList, isCompilable } from './kysely-compile.js'
 export type { Compilable } from './kysely-compile.js'
 
 // Kysely's own sql tag — use this inside query builders (.where, .select, .orderBy, etc.)

@@ -97,14 +97,85 @@ export function toSqlFragment(query: SqlFragment | Compilable): SqlFragment {
  * are inlined as PostgreSQL literals before extraction.
  */
 export function extractFromClause(query: Compilable): SqlFragment {
-  const compiled = query.compile()
+  // AST-first path: replace selections with a single "SELECT *" to avoid
+  // ambiguity with commas or subqueries inside the column list.
+  if (typeof (query as unknown as { toOperationNode?: unknown }).toOperationNode === 'function') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = (query as any).toOperationNode()
+    if (node.kind === 'SelectQueryNode') {
+      const starNode = {
+        ...node,
+        selections: [
+          {
+            kind: 'SelectionNode',
+            selection: { kind: 'RawNode', sqlFragments: ['*'], parameters: [] },
+          },
+        ],
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const compiled = compileNode(starNode as any)
+      const inlined = inlineParameters(compiled.sql, compiled.parameters)
+      const astMatch = /^select\s+\*\s+from\s+([\s\S]+)$/is.exec(inlined.trim())
+      if (astMatch && astMatch[1]) {
+        return { _tag: 'sql', text: astMatch[1].trim() }
+      }
+    }
+  }
 
+  // String-scanning fallback.
+  const compiled = query.compile()
   const inlinedSql = inlineParameters(compiled.sql, compiled.parameters)
   const match = /^select\s+.+?\s+from\s+([\s\S]+)$/is.exec(inlinedSql.trim())
 
   if (!match || !match[1]) {
     throw new Error(
       `extractFromClause: could not find a FROM clause in the compiled SQL:\n${inlinedSql}`,
+    )
+  }
+
+  return { _tag: 'sql', text: match[1].trim() }
+}
+
+/**
+ * Extracts the SELECT column list from a Kysely SelectQueryBuilder and returns
+ * it as a SqlFragment (without the leading "SELECT" keyword and without the
+ * FROM clause). Useful for building `SELECT <cols> INTO <target> FROM …`
+ * in PL/pgSQL via intoRecord.
+ *
+ * AST path: compiles just the selections node when available.
+ * Fallback: compiles the full query and extracts via regex.
+ *
+ * Throws a descriptive error if extraction fails.
+ */
+export function extractSelectList(query: Compilable): SqlFragment {
+  // AST-first path: compile only the selections list.
+  if (typeof (query as unknown as { toOperationNode?: unknown }).toOperationNode === 'function') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = (query as any).toOperationNode()
+    if (node.kind === 'SelectQueryNode' && node.selections) {
+      const selectionsOnlyNode = {
+        kind: 'SelectQueryNode',
+        selections: node.selections,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any
+      const compiled = compileNode(selectionsOnlyNode)
+      const inlined = inlineParameters(compiled.sql, compiled.parameters)
+      // Strip the leading "select " keyword added by the compiler.
+      const colList = inlined.replace(/^select\s+/i, '').trim()
+      if (colList) {
+        return { _tag: 'sql', text: colList }
+      }
+    }
+  }
+
+  // String-scanning fallback: compile the full query and carve out columns.
+  const compiled = query.compile()
+  const inlinedSql = inlineParameters(compiled.sql, compiled.parameters)
+  const match = /^select\s+([\s\S]+?)\s+from\s+/is.exec(inlinedSql.trim())
+
+  if (!match || !match[1]) {
+    throw new Error(
+      `extractSelectList: could not extract the SELECT column list from the compiled SQL:\n${inlinedSql}`,
     )
   }
 

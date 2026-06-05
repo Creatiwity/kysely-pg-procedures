@@ -1,7 +1,7 @@
 import type { SqlFragment, Statement, RaiseLevel, VarDecls } from './types.js'
 import type { TempTableDef } from './types.js'
 import { sql } from './sql.js'
-import { compileDb, isCompilable, toSqlFragment, extractFromClause, isKyselyExpression, expressionToFragment } from './kysely-compile.js'
+import { compileDb, isCompilable, toSqlFragment, extractFromClause, extractSelectList, isKyselyExpression, expressionToFragment } from './kysely-compile.js'
 import type { Compilable } from './kysely-compile.js'
 import { buildTempTableAliasMap } from './tempTable.js'
 import type { TempTableHelper, TempTableAliasMap, TempTableDbExt } from './tempTable.js'
@@ -103,6 +103,7 @@ declare module 'kysely' {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     into(vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }): void
     intoRow(varName: string, opts?: { strict?: boolean }): void
+    intoRecord(varName: string, opts?: { strict?: boolean }): void
   }
   interface InsertQueryBuilder<DB, TB extends keyof DB, O> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -203,9 +204,17 @@ export type DbContext<
   /** Plain CTE wrapper — typed against the combined schema */
   with: Kysely<ExtendedDB<TDB, TTables>>['with']
 
-  /** FOR _kpp_rowN IN query LOOP … END LOOP — body receives a typed row proxy */
+  /** FOR [varName] IN query LOOP … END LOOP — body receives a typed row proxy */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   forRow<O extends Record<string, unknown> = Record<string, unknown>>(source: SqlFragment | Compilable, body: (row: TypedRowRef<O>) => void): void
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  forRow<O extends Record<string, unknown> = Record<string, unknown>>(rowVar: string, source: SqlFragment | Compilable, body: (row: TypedRowRef<O>) => void): void
+
+  /** FOR varName IN ARRAY array LOOP … END LOOP */
+  forEach(varName: string, array: SqlFragment | Compilable, body: () => void): void
+
+  /** RETURN QUERY query */
+  returnQuery(query: SqlFragment | Compilable): void
 
   /** FOR var IN from..to LOOP … END LOOP */
   forIn(varName: string, from: SqlFragment | number, to: SqlFragment | number, body: () => void): void
@@ -397,6 +406,20 @@ function wrapSelectBuilder(
             fromClause = extractFromClause((target as any).selectAll())
           }
           push({ kind: 'selectInto', vars: { [varName]: sql.raw('*') }, from: fromClause, strict: opts?.strict })
+        }
+      }
+
+      if (prop === 'intoRecord') {
+        return (varName: string, opts?: { strict?: boolean }) => {
+          const selectList = extractSelectList(target)
+          let fromClause: SqlFragment
+          try {
+            fromClause = extractFromClause(target)
+          } catch {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            fromClause = extractFromClause((target as any).selectAll())
+          }
+          push({ kind: 'selectInto', vars: { [varName]: selectList }, from: fromClause, strict: opts?.strict })
         }
       }
 
@@ -644,12 +667,33 @@ export function buildDbContext<
     },
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    forRow<O extends Record<string, unknown> = Record<string, unknown>>(source: SqlFragment | Compilable, body: (row: TypedRowRef<O>) => void): void {
-      const rowVar = `_kpp_row${_forRowCounter++}`
+    forRow<O extends Record<string, unknown> = Record<string, unknown>>(rowVarOrSource: string | SqlFragment | Compilable, sourceOrBody: SqlFragment | Compilable | ((row: TypedRowRef<O>) => void), maybeBody?: (row: TypedRowRef<O>) => void): void {
+      let rowVar: string
+      let source: SqlFragment | Compilable
+      let body: (row: TypedRowRef<O>) => void
+      if (typeof rowVarOrSource === 'string') {
+        rowVar = rowVarOrSource
+        source = sourceOrBody as SqlFragment | Compilable
+        body = maybeBody!
+      } else {
+        rowVar = `_kpp_row${_forRowCounter++}`
+        source = rowVarOrSource
+        body = sourceOrBody as (row: TypedRowRef<O>) => void
+      }
       const query = toSqlFragment(source)
       const rowRef = makeTypedRowRef<O>(rowVar)
       const bodyStmts = captureBlock(() => body(rowRef))
       push({ kind: 'forRow', rowVar, query, body: bodyStmts })
+    },
+
+    forEach(varName: string, array: SqlFragment | Compilable, body: () => void): void {
+      const resolved = toSqlFragment(array)
+      const bodyStmts = captureBlock(body)
+      push({ kind: 'forEach', rowVar: varName, array: resolved, body: bodyStmts })
+    },
+
+    returnQuery(query: SqlFragment | Compilable): void {
+      push({ kind: 'returnQuery', query: toSqlFragment(query) })
     },
 
     forIn(varName: string, from: SqlFragment | number, to: SqlFragment | number, body: () => void): void {

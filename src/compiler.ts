@@ -120,6 +120,7 @@ function childStatements(stmt: Statement): Statement[] {
     case 'while':
     case 'loop':
     case 'forIn':
+    case 'forEach':
       return stmt.body
     case 'catch':
       return stmt.handlers.flatMap((h) => h.then)
@@ -215,6 +216,8 @@ function statementKindLabel(kind: string): string {
     tempDelete: 'TEMPDELETE',
     selectInto: 'SELECTINTO',
     dmlInto: 'DMLINTO',
+    returnQuery: 'RETURNQUERY',
+    forEach: 'FOREACH',
   }
   return map[kind] ?? kind.toUpperCase()
 }
@@ -307,6 +310,9 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
 
     case 'set':
       return `${i}${stmt.target} := ${frag(stmt.value)};`
+
+    case 'returnQuery':
+      return i + 'RETURN QUERY ' + frag(stmt.query) + ';'
 
     case 'return': {
       // Inject log flush before every RETURN when log level is active
@@ -419,6 +425,16 @@ function compileStmt(stmt: Statement, level: number, ctx?: StmtCtx): string {
         return `${stmtSql}\n${compileStepAppend(stmt, idx, level, ctx)}`
       }
       return stmtSql
+    }
+
+    case 'forEach': {
+      const lines = [i + 'FOREACH ' + stmt.rowVar + ' IN ARRAY ' + frag(stmt.array) + ' LOOP']
+      for (const s of filterBody(stmt.body)) {
+        const out = recurse(s, level + 1)
+        if (out) lines.push(out)
+      }
+      lines.push(i + 'END LOOP;')
+      return lines.join('\n')
     }
 
     case 'forRow': {
