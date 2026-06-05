@@ -80,6 +80,8 @@ export interface RowProxy {
 export type IfCondition =
   | SqlFragment
   | ColumnRef
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  | Expression<any>
   | [ColumnRef | SqlFragment, string, SqlFragment | string | number]
 
 /**
@@ -96,7 +98,8 @@ declare module 'kysely' {
      *
      * Only valid inside a `defineProcedure` / `defineRowProcedure` body.
      */
-    into(vars: Record<string, SqlFragment>, opts?: { strict?: boolean }): void
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    into(vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }): void
   }
 }
 
@@ -275,6 +278,8 @@ function conditionToFragment(condition: IfCondition): SqlFragment {
         : sql.raw(typeof rhs === 'string' ? `'${rhs.replace(/'/g, "''")}'` : String(rhs))
     return sql`${lhs} ${sql.raw(op)} ${rhsFragment}`
   }
+  if (isKyselyExpression(condition as unknown)) { return expressionToFragment(condition as Expression<any>) }
+  if (isCompilable(condition as unknown)) { return toSqlFragment(condition as unknown as Compilable) }
   return condition as SqlFragment
 }
 
@@ -283,11 +288,11 @@ function valueToFragment(value: SqlFragment | Compilable | Expression<any> | str
   if (typeof value === 'object' && value !== null && '_tag' in value) {
     return value as SqlFragment
   }
-  if (isCompilable(value)) {
-    return toSqlFragment(value)
-  }
   if (isKyselyExpression(value)) {
     return expressionToFragment(value)
+  }
+  if (isCompilable(value)) {
+    return toSqlFragment(value)
   }
   if (typeof value === 'string') {
     return sql.raw(`'${value.replace(/'/g, "''")}'`)
@@ -346,7 +351,8 @@ function wrapSelectBuilder(
   return new Proxy(inner, {
     get(target, prop: string | symbol) {
       if (prop === 'into') {
-        return (vars: Record<string, SqlFragment>, opts?: { strict?: boolean }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (vars: Record<string, SqlFragment | Expression<any>>, opts?: { strict?: boolean }) => {
           // If extractFromClause throws (no SELECT clause on the builder), retry with selectAll()
           let fromClause: SqlFragment
           try {
@@ -355,7 +361,11 @@ function wrapSelectBuilder(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             fromClause = extractFromClause((target as any).selectAll())
           }
-          push({ kind: 'selectInto', vars, from: fromClause, strict: opts?.strict })
+          const resolvedVars: Record<string, SqlFragment> = {}
+          for (const [k, v] of Object.entries(vars)) {
+            resolvedVars[k] = valueToFragment(v)
+          }
+          push({ kind: 'selectInto', vars: resolvedVars, from: fromClause, strict: opts?.strict })
         }
       }
 

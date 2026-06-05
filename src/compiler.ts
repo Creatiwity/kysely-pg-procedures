@@ -91,6 +91,9 @@ function collectVars(stmts: Statement[], onWarn?: (msg: string) => void): Map<st
         vars.set(name, `${typeStr}${defaultVal}`)
       }
     }
+    if (stmt.kind === "forRow" && !vars.has(stmt.rowVar)) {
+      vars.set(stmt.rowVar, "RECORD")
+    }
     for (const [k, v] of collectVars(childStatements(stmt), onWarn)) {
       if (!vars.has(k)) {
         vars.set(k, v)

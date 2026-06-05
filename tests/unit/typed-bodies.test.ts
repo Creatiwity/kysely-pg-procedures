@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { compileProcedure } from '../../src/compiler.js'
 import { defineProcedure } from '../../src/procedure.js'
 import { sql } from '../../src/sql.js'
+import { sql as ksql } from 'kysely'
 
 describe('typed procedure bodies — round 3', () => {
   // -------------------------------------------------------------------------
@@ -221,5 +222,64 @@ describe('typed procedure bodies — round 3', () => {
 
     expect(output).toContain("RAISE WARNING 'heads up'")
     expect(output).not.toContain('USING')
+  })
+
+  // -------------------------------------------------------------------------
+  // Test A: forRow loop variable is declared as RECORD in DECLARE block
+  // -------------------------------------------------------------------------
+  it('forRow loop variable is declared as RECORD in DECLARE block', () => {
+    const proc = defineProcedure(
+      { name: 'test_forrow_declare', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.forRow(db.selectFrom('items' as any).selectAll(), (_row) => {
+          db.raise('NOTICE', 'item found')
+        })
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).toContain('_kpp_row0 RECORD')
+  })
+
+  // -------------------------------------------------------------------------
+  // Test B: db.if accepts a Kysely Expression (ksql) as condition
+  // -------------------------------------------------------------------------
+  it('db.if accepts a Kysely Expression (ksql) as condition', () => {
+    const proc = defineProcedure(
+      { name: 'test_if_kysely_expr', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.if(ksql`active = TRUE` as any, () => {
+          db.raise('NOTICE', 'active')
+        })
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).not.toContain('undefined')
+    expect(output).toContain('active = TRUE')
+  })
+
+  // -------------------------------------------------------------------------
+  // Test C: db.set accepts a Kysely Expression (ksql) as value
+  // -------------------------------------------------------------------------
+  it('db.set accepts a Kysely Expression (ksql) as value', () => {
+    const proc = defineProcedure(
+      { name: 'test_set_kysely_expr', returns: 'void', language: 'plpgsql' },
+      [],
+      {},
+      ({ db }) => {
+        db.set('my_var', ksql`42 + 1` as any)
+      },
+    )
+
+    const output = compileProcedure(proc)
+
+    expect(output).not.toContain('undefined')
   })
 })
